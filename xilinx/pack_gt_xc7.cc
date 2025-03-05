@@ -246,16 +246,17 @@ void XC7Packer::pack_gt()
                 auto net = get_net_or_empty(ci, port.first);
 
                 // If one of the clock ports is tied, then Vivado just disconnects them
-                if (net != nullptr && boost::starts_with(port_name, "PLL") && boost::ends_with(port_name, "CLK")) {
+                if (net != nullptr && (boost::starts_with(port_name, "PLL") && boost::ends_with(port_name, "CLK"))
+                                && !boost::contains(port_name, "CLKMONITOR")) {
                     if (net->name == ctx->id("$PACKER_GND_NET") || net->name == ctx->id("$PACKER_VCC_NET")) {
                         disconnect_port(ctx, ci, port.first);
                         continue;
                     }
                     auto driver = net->driver.cell;
                     if (driver->type != id_GTPE2_COMMON)
-                        log_error("The clock input ports of the GTPE2_CHANNEL instance %s can only be driven "
+                        log_error("The clock port '%s' of the GTPE2_CHANNEL instance %s can only be driven "
                                     "by the clock ouputs of a GTPE2_COMMON instance, but not %s\n",
-                                    ci->name.c_str(ctx), driver->type.c_str(ctx));
+                                    port_name.c_str(), ci->name.c_str(ctx), driver->type.c_str(ctx));
                     auto drv_port = net->driver.port.str(ctx);
                     auto port_prefix = port_name.substr(0, 4);
                     auto port_suffix = port_name.substr(4);
@@ -301,16 +302,19 @@ void XC7Packer::pack_gt()
                 auto net = get_net_or_empty(ci, port.first);
 
                 // If one of the clock ports is tied, then Vivado just disconnects them
-                if (net != nullptr && boost::starts_with(port_name, "PLL") && boost::ends_with(port_name, "CLK")) {
+                if (net != nullptr && ((boost::starts_with(port_name, "PLL") && boost::ends_with(port_name, "CLK")) ||
+                                       boost::contains(port_name, "REFCLK")) &&
+                                       !boost::contains(port_name, "CLKMONITOR") &&
+                                       !boost::contains(port_name, "CLKLOST")) {
                     if (net->name == ctx->id("$PACKER_GND_NET") || net->name == ctx->id("$PACKER_VCC_NET")) {
                         disconnect_port(ctx, ci, port.first);
                         continue;
                     }
                     auto driver = net->driver.cell;
                     if (driver->type != id_GTXE2_COMMON)
-                        log_error("The clock input ports of the GTXE2_CHANNEL instance %s can only be driven "
+                        log_error("The clock port '%s' of the GTXE2_CHANNEL instance %s can only be driven "
                                     "by the clock ouputs of a GTXE2_COMMON instance, but not %s\n",
-                                    ci->name.c_str(ctx), driver->type.c_str(ctx));
+                                    port_name.c_str(), ci->name.c_str(ctx), driver->type.c_str(ctx));
                     auto drv_port = net->driver.port.str(ctx);
                     auto port_prefix = port_name.substr(0, 4);
                     auto port_suffix = port_name.substr(4);
