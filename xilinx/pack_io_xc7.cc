@@ -309,7 +309,8 @@ void XC7Packer::pack_io()
             log_info("    Constraining '%s' to site '%s'\n", pad->name.c_str(ctx), site.c_str());
             std::string tile = get_tilename_by_sitename(ctx, site);
             log_info("    Tile '%s'\n", tile.c_str());
-            if (boost::starts_with(tile, "GTP_COMMON") || boost::starts_with(tile, "GTP_CHANNEL")) {
+            if (boost::starts_with(tile, "GTP_COMMON") || boost::starts_with(tile, "GTP_CHANNEL") ||
+                boost::starts_with(tile, "GTX_COMMON") || boost::starts_with(tile, "GTX_CHANNEL")) {
                 auto pad_bel = std::string(site + "/PAD");
                 pad->attrs[id_BEL] = pad_bel;
             } else {
