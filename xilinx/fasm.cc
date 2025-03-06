@@ -767,6 +767,8 @@ struct FasmBackend
             if (boost::contains(usr.cell->type.str(ctx), "INBUF"))
                 is_input = true;
         std::string tile = get_tile_name(pad->bel.tile);
+        if (boost::starts_with(tile, "GTP_") || boost::starts_with(tile, "GTX_"))
+            return;
         push(tile);
 
         bool is_riob18   = boost::starts_with(tile, "RIOB18_");

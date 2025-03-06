@@ -1310,9 +1310,10 @@ int Arch::getHclkForIob(BelId pad)
     if (boost::starts_with(tiletype, "LIOB"))
         ioi += 1;
     else if (boost::starts_with(tiletype, "RIOB") ||
-             boost::starts_with(tiletype, "GTP_"))
+             boost::starts_with(tiletype, "GTP_") ||
+             boost::starts_with(tiletype, "GTX_")) {
         ioi -= 1;
-    else {
+    } else {
         std::string message = "unknown IOB side of tile type " + tiletype;
         NPNR_ASSERT_FALSE(message.c_str());
     }
