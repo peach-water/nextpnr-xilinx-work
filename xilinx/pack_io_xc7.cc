@@ -818,9 +818,9 @@ void XC7Packer::pack_iologic()
             // according to ug953 they should be left unconnected or connected to ground
             // when not in slave mode, which is the same, since there are no wire routes to GND
             NetInfo *shiftin1 = get_net_or_empty(ci, ctx->id("SHIFTIN1"));
-            if (shiftin1 != nullptr && shiftin1->name == ctx->id("$PACKER_GND_NET")) disconnect_port(ctx, ci, ctx->id("SHIFTIN1"));
+            if (shiftin1 != nullptr && shiftin1->name == ctx->id("$PACKER_GND_NET")) { disconnect_port(ctx, ci, ctx->id("SHIFTIN1")); shiftin1 = nullptr; }
             NetInfo *shiftin2 = get_net_or_empty(ci, ctx->id("SHIFTIN2"));
-            if (shiftin2 != nullptr && shiftin2->name == ctx->id("$PACKER_GND_NET")) disconnect_port(ctx, ci, ctx->id("SHIFTIN2"));
+            if (shiftin2 != nullptr && shiftin2->name == ctx->id("$PACKER_GND_NET")) { disconnect_port(ctx, ci, ctx->id("SHIFTIN2")); shiftin2 = nullptr; }
             // If this is tied to GND it's just unused. This does not have a route to GND anyway.
             NetInfo *tbytein = get_net_or_empty(ci, ctx->id("TBYTEIN"));
             if (tbytein != nullptr && tbytein->name == ctx->id("$PACKER_GND_NET")) disconnect_port(ctx, ci, ctx->id("TBYTEIN"));
