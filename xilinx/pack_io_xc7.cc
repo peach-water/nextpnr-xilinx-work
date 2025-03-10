@@ -1028,42 +1028,41 @@ void XC7Packer::pack_iologic()
 
 void XC7Packer::pack_idelayctrl()
 {
-    auto get_iodelay_group_number = [&](CellInfo * ci) {
-        int64_t group_number = -1;
+    auto get_iodelay_group_name = [&](CellInfo * ci) {
+        std::string group_name = "";
         auto iodelay_group = ci->attrs.find(ctx->id("IODELAY_GROUP"));
         if (iodelay_group != ci->attrs.end()) {
-            group_number = (*iodelay_group).second.as_int64();
+            group_name = (*iodelay_group).second.as_string();
         }
-        return group_number;
+        return group_name;
     };
 
-    std::unordered_map<int64_t, CellInfo *> idelayctrl_map;
+    std::unordered_map<std::string, CellInfo *> idelayctrl_map;
     for (auto cell : sorted(ctx->cells)) {
         CellInfo *ci = cell.second;
         if (ci->type == ctx->id("IDELAYCTRL")) {
-            int64_t group_number = get_iodelay_group_number(ci);
-            if (0 < idelayctrl_map.count(group_number)) {
-                if (group_number == -1)
+            std::string group_name = get_iodelay_group_name(ci);
+            if (0 < idelayctrl_map.count(group_name)) {
+                if (group_name == "")
                     log_error("Found more than one IDELAYCTRL cell for the default IODELAY_GROUP!\n");
                 else
-                    log_error("Found more than one IDELAYCTRL cell for the IODELAY_GROUP with number %ld!\n", group_number);
+                    log_error("Found more than one IDELAYCTRL cell for the IODELAY_GROUP with name %s!\n", group_name.c_str());
             }
-            idelayctrl_map[group_number] = ci;
+            idelayctrl_map[group_name] = ci;
         }
     }
     if (idelayctrl_map.empty())
         return;
     for (auto group : idelayctrl_map)
     {
-        auto group_number = group.first;
+        auto group_name = group.first;
         auto idelayctrl = group.second;
-        auto group_name = group_number == -1 ? "default" : std::to_string(group_number);
         std::set<std::string> ioctrl_sites;
         for (auto cell : sorted(ctx->cells)) {
             CellInfo *ci = cell.second;
             if (ci->type == ctx->id("IDELAYE2_IDELAYE2") || ci->type == ctx->id("ODELAYE2_ODELAYE2")) {
-                auto grp_num = get_iodelay_group_number(ci);
-                if (!ci->attrs.count(ctx->id("BEL")) || grp_num != group_number)
+                auto grp_name = get_iodelay_group_name(ci);
+                if (!ci->attrs.count(ctx->id("BEL")) || grp_name != group_name)
                     continue;
                 ioctrl_sites.insert(get_ioctrl_site(ci->attrs.at(ctx->id("X_IO_BEL")).as_string()));
             }
