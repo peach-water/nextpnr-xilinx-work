@@ -3380,8 +3380,10 @@ struct FasmBackend
         write_bit("BOTH_GTREFCLK_USED", bool_or_default(ci->params, ctx->id("_BOTH_GTREFCLK_USED"), false));
         write_bit("GTREFCLK0_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK0_USED"), false));
         write_bit("GTREFCLK1_USED", bool_or_default(ci->params, ctx->id("_GTREFCLK1_USED"), false));
-        // TODO: not available in segbits
-        // write_bit("GTGREFCLK_USED", bool_or_default(ci->params, ctx->id("_GTGREFCLK_USED"), false));
+        if (bool_or_default(ci->params, ctx->id("_GTGREFCLK_USED"), false)) {
+            write_bit("GTREFCLK0_USED");
+            write_bit("GTREFCLK1_USED");
+        }
         auto clkswing_cfg = int_or_default(ci->params, ctx->id("CLKSWING_CFG"), 3);
         if (clkswing_cfg != 3) log_warning("%s/%s: According to ug476, CLK should always be 0b11\n",
                                            ci->hierpath.c_str(ctx), ci->name.c_str(ctx));
@@ -3399,7 +3401,7 @@ struct FasmBackend
 
         // according to ug476, these attributes contain magic undocumented and reserved wizard values
         // TODO: check values
-        write_int_vector("QPLL_CFG[26:0]", 0b11010000000000110000001, 27);
+        write_int_vector("QPLL_CFG[26:0]", 0b11010000000000111000001, 27);
         write_int_vector("QPLL_CLKOUT_CFG[3:0]", 0, 4);
         write_int_vector("QPLL_COARSE_FREQ_OVRD[5:0]", 0b10000, 6);
         auto coarse_freq_ovrd_en = int_or_default(ci->params, ctx->id("QPLL_COARSE_FREQ_OVRD_EN"), 0);
@@ -3419,7 +3421,8 @@ struct FasmBackend
         auto qpll_refclk_div = int_or_default(ci->params, ctx->id("QPLL_REFCLK_DIV"), 1);
         if (qpll_refclk_div < 1 || qpll_refclk_div > 4)
             log_error("QPLL_REFCLK_DIV can only range from 1 to 4, but is: %d", qpll_refclk_div);
-        write_int_vector("QPLL_REFCLK_DIV[4:0]", qpll_refclk_div, 5);
+        auto real_qpll_refclk_div = qpll_refclk_div == 1 ? 16 : qpll_refclk_div - 2;
+        write_int_vector("QPLL_REFCLK_DIV[4:0]", real_qpll_refclk_div, 5);
 
         auto qpll_fbdiv = int_or_default(ci->params, ctx->id("QPLL_FBDIV"), 1);
         write_int_vector("QPLL_FBDIV[9:0]", qpll_fbdiv, 10);
