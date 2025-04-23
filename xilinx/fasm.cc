@@ -3551,6 +3551,57 @@ void write_gtx_channel(CellInfo *ci)
 
         write_str_bool("CLK_CORRECT_USE", "CLK_CORRECT_USE");
 
+        auto cpll_cfg = int_or_default(ci->params, ctx->id("CPLL_CFG"), 0b101111000000011111011100);
+        write_int_vector("CPLL_CFG[23:0]", cpll_cfg, 24);
+
+        auto cpll_fbdiv = int_or_default(ci->params, ctx->id("CPLL_FBDIV"), 1);
+        switch (cpll_fbdiv) {
+            case 1: cpll_fbdiv  = 16; break;
+            case 2: cpll_fbdiv  =  0; break;
+            case 3: cpll_fbdiv  =  1; break;
+            case 4: cpll_fbdiv  =  2; break;
+            case 5: cpll_fbdiv  =  3; break;
+            case 6: cpll_fbdiv  =  5; break;
+            case 8: cpll_fbdiv  =  6; break;
+            case 10: cpll_fbdiv =  7; break;
+            case 12: cpll_fbdiv = 13; break;
+            case 16: cpll_fbdiv = 14; break;
+            case 20: cpll_fbdiv = 15; break;
+            default:
+                log_error("CPLL_FBDIV can only be 1, 2, 3, 4, 5, 6, 8, 10, 12, 16 or 20, but is: %d", cpll_fbdiv);
+                break;
+        }
+        write_int_vector("CPLL_FBDIV[4:0]", cpll_fbdiv, 5);
+
+        auto cpll_fbdiv_45 = int_or_default(ci->params, ctx->id("CPLL_FBDIV_45"), 4);
+        if (cpll_fbdiv_45 < 4 || cpll_fbdiv_45 > 5)
+            log_error("CPLL_FBDIV_45 can only be 4 or 5, but is: %d", cpll_fbdiv);
+        write_bit("CPLL_FBDIV_45[0]", cpll_fbdiv_45 == 5);
+
+        auto cpll_init_cfg = int_or_default(ci->params, ctx->id("CPLL_INIT_CFG"), 0b11110);
+        write_int_vector("CPLL_INIT_CFG[4:0]", cpll_init_cfg, 5);
+        auto cpll_lock_cfg = int_or_default(ci->params, ctx->id("CPLL_LOCK_CFG"), 0b111101000);
+        write_int_vector("CPLL_LOCK_CFG[8:0]", cpll_lock_cfg, 9);
+
+        auto cpll_refclk_div = int_or_default(ci->params, ctx->id("CPLL_REFCLK_DIV"), 1);
+        switch (cpll_refclk_div) {
+            case 1: cpll_refclk_div  = 16; break;
+            case 2: cpll_refclk_div  =  0; break;
+            case 3: cpll_refclk_div  =  1; break;
+            case 4: cpll_refclk_div  =  2; break;
+            case 5: cpll_refclk_div  =  3; break;
+            case 6: cpll_refclk_div  =  5; break;
+            case 8: cpll_refclk_div  =  6; break;
+            case 10: cpll_refclk_div =  7; break;
+            case 12: cpll_refclk_div = 13; break;
+            case 16: cpll_refclk_div = 14; break;
+            case 20: cpll_refclk_div = 15; break;
+            default:
+                log_error("CPLL_REFCLK_DIV can only be 1, 2, 3, 4, 5, 6, 8, 10, 12, 16 or 20, but is: %d", cpll_refclk_div);
+                break;
+        }
+        write_int_vector("CPLL_REFCLK_DIV[4:0]", cpll_refclk_div, 5);
+
         write_str_bool("DEC_MCOMMA_DETECT", "DEC_MCOMMA_DETECT");
         write_str_bool("DEC_PCOMMA_DETECT", "DEC_PCOMMA_DETECT");
         write_str_bool("DEC_VALID_COMMA_ONLY", "DEC_VALID_COMMA_ONLY");
@@ -3598,6 +3649,9 @@ void write_gtx_channel(CellInfo *ci)
         write_inv("TXUSRCLK2");
         write_inv("RXUSRCLK2");
         write_inv("TXUSRCLK2");
+
+        auto outrefclk_sel_inv = int_or_default(ci->params, ctx->id("OUTREFCLK_SEL_INV"), 0b10);
+        write_int_vector("OUTREFCLK_SEL_INV[1:0]", outrefclk_sel_inv, 2);
 
         write_str_bool("PCS_PCIE_EN", "PCS_PCIE_EN");
 
@@ -3652,6 +3706,29 @@ void write_gtx_channel(CellInfo *ci)
         auto rx_debug_cfg = int_or_default(ci->params, ctx->id("RX_DEBUG_CFG"), 0);
         write_int_vector("RX_DEBUG_CFG[10:0]", rx_debug_cfg, 11);
         write_str_bool("RX_DEFER_RESET_BUF_EN", "RX_DEFER_RESET_BUF_EN");
+
+        // default values, see ug476, default values from wizards not mentioned in the handbook taken from LiteX
+        auto rx_dfe_gain_cfg = int_or_default(ci->params, ctx->id("RX_DFE_GAIN_CFG"), 0x020FEA);
+        write_int_vector("RX_DFE_GAIN_CFG[17:0]", rx_dfe_gain_cfg, 18);
+        auto rx_dfe_h2_cfg = int_or_default(ci->params, ctx->id("RX_DFE_H2_CFG"), 0x000);
+        write_int_vector("RX_DFE_H2_CFG[11:0]", rx_dfe_h2_cfg, 12);
+        auto rx_dfe_h3_cfg = int_or_default(ci->params, ctx->id("RX_DFE_H3_CFG"), 0x040);
+        write_int_vector("RX_DFE_H3_CFG[11:0]", rx_dfe_h3_cfg, 12);
+        auto rx_dfe_h4_cfg = int_or_default(ci->params, ctx->id("RX_DFE_H4_CFG"), 0x0f0);
+        write_int_vector("RX_DFE_H4_CFG[10:0]", rx_dfe_h4_cfg, 11);
+        auto rx_dfe_h5_cfg = int_or_default(ci->params, ctx->id("RX_DFE_H5_CFG"), 0x0e0);
+        write_int_vector("RX_DFE_H5_CFG[10:0]", rx_dfe_h5_cfg, 11);
+        auto rx_dfe_kl_cfg = int_or_default(ci->params, ctx->id("RX_DFE_KL_CFG"), 0b11111110);
+        write_int_vector("RX_DFE_KL_CFG[12:0]", rx_dfe_kl_cfg, 13);
+        auto rx_dfe_kl_cfg2 = int_or_default(ci->params, ctx->id("RX_DFE_KL_CFG2"), 0b110000000100010100100010101100);
+        write_int_vector("RX_DFE_KL_CFG2[31:0]", rx_dfe_kl_cfg2, 32);
+        auto rx_dfe_lpm_cfg = int_or_default(ci->params, ctx->id("RX_DFE_LPM_CFG"), 0b100101010100);
+        write_int_vector("RX_DFE_LPM_CFG[11:0]", rx_dfe_lpm_cfg, 12);
+        auto rx_dfe_ut_cfg = int_or_default(ci->params, ctx->id("RX_DFE_UT_CFG"), 0x11E00);
+        write_int_vector("RX_DFE_UT_CFG[16:0]", rx_dfe_ut_cfg, 17);
+        auto rx_dfe_vp_cfg = int_or_default(ci->params, ctx->id("RX_DFE_VP_CFG"), 0x03F03);
+        write_int_vector("RX_DFE_VP_CFG[16:0]", rx_dfe_vp_cfg, 17);
+
         write_str_bool("RX_DISPERR_SEQ_MATCH", "RX_DISPERR_SEQ_MATCH");
         auto rx_os_cfg = int_or_default(ci->params, ctx->id("RX_OS_CFG"), 0);
         write_int_vector("RX_OS_CFG[12:0]", rx_os_cfg, 13);
@@ -3694,12 +3771,17 @@ void write_gtx_channel(CellInfo *ci)
         write_bit("RXCDR_PH_RESET_ON_EIDLE[0]", rxcdr_ph_reset_on_eidle);
         auto rxcdr_hold_during_eidle = bool_or_default(ci->params, ctx->id("RXCDR_HOLD_DURING_EIDLE"), false);
         write_bit("RXCDR_HOLD_DURING_EIDLE[0]", rxcdr_hold_during_eidle);
+        auto rx_clkmux_pd = bool_or_default(ci->params, ctx->id("RX_CLKMUX_PD"), true);
+        write_bit("RX_CLKMUX_PD[0]", rx_clkmux_pd);
         auto rxcdr_lock_cfg = int_or_default(ci->params, ctx->id("RXCDR_LOCK_CFG"), 0);
         write_int_vector("RXCDR_LOCK_CFG[5:0]", rxcdr_lock_cfg, 6);
         auto rxcdrfreqreset_time = int_or_default(ci->params, ctx->id("RXCDRFREQRESET_TIME"), 0);
         write_int_vector("RXCDRFREQRESET_TIME[4:0]", rxcdrfreqreset_time, 5);
         auto rxcdrphreset_time = int_or_default(ci->params, ctx->id("RXCDRPHRESET_TIME"), 0);
         write_int_vector("RXCDRPHRESET_TIME[4:0]", rxcdrphreset_time, 5);
+
+        auto rxdfelpmreset_time = int_or_default(ci->params, ctx->id("RXDFELPMRESET_TIME"), 0);
+        write_int_vector("RXDFELPMRESET_TIME[6:0]", rxdfelpmreset_time, 7);
 
         auto rxdly_cfg = int_or_default(ci->params, ctx->id("RXDLY_CFG"), 0);
         write_int_vector("RXDLY_CFG[15:0]", rxdly_cfg, 16);
@@ -3857,6 +3939,8 @@ void write_gtx_channel(CellInfo *ci)
         write_bit("TX_XCLK_SEL.TXUSR", tx_xclk_sel == "TXUSR");
         auto tx_clk25_div = int_or_default(ci->params, ctx->id("TX_CLK25_DIV"), 0) - 1;
         write_int_vector("TX_CLK25_DIV[4:0]", tx_clk25_div, 5);
+        auto tx_clkmux_pd = bool_or_default(ci->params, ctx->id("TX_CLKMUX_PD"), true);
+        write_bit("TX_CLKMUX_PD[0]", tx_clkmux_pd);
         auto tx_deemph0 = int_or_default(ci->params, ctx->id("TX_DEEMPH0"), 0);
         write_int_vector("TX_DEEMPH0[5:0]", tx_deemph0, 6);
         auto tx_deemph1 = int_or_default(ci->params, ctx->id("TX_DEEMPH1"), 0);
