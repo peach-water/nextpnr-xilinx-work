@@ -818,7 +818,7 @@ void XC7Packer::pack_iologic()
             xform_cell(oddr_rules, ci);
 
             ci->attrs[ctx->id("BEL")] = ol_site + (is_tristate ? "/TFF" : "/OUTFF");
-        } else if (ci->type == ctx->id("OSERDESE2")) {
+        } else if (ci->type == id_OSERDESE2) {
             // according to ug953 they should be left unconnected or connected to ground
             // when not in slave mode, which is the same, since there are no wire routes to GND
             NetInfo *shiftin1 = get_net_or_empty(ci, ctx->id("SHIFTIN1"));
@@ -841,11 +841,24 @@ void XC7Packer::pack_iologic()
                 BelId io_bel;
                 CellInfo *ob = !q_disconnected ? find_p_outbuf(q) : find_p_outbuf(ofb);
                 if (ob != nullptr) {
-                    io_bel = ctx->getBelByName(ctx->id(ob->attrs.at(ctx->id("BEL")).as_string()));
+                    io_bel = ctx->getBelByName(ctx->id(ob->attrs.at(id_BEL).as_string()));
                     std::string ol_site = get_ologic_site(ctx->getBelName(io_bel).str(ctx));
                     auto bel_name = ol_site + "/OSERDESE2";
-                    ci->attrs[ctx->id("BEL")] = bel_name;
+                    ci->attrs[id_BEL] = bel_name;
                     used_oserdes_bels.insert(ctx->getBelByName(ctx->id(bel_name)));
+
+                    if (shiftin1 != nullptr || shiftin2 != nullptr) {
+                        // slave location is one below master, so place the slave there
+                        std::vector<std::string> parts;
+                        boost::split(parts, bel_name, boost::is_any_of("Y"));
+                        auto y_coord_slave = std::stoi(parts.back()) - 1;
+                        auto slave_bel_name = parts.front() + "Y" + std::to_string(y_coord_slave) + "/OSERDESE2";
+
+                        CellInfo *slave_cell;
+                        if (shiftin1 != nullptr) slave_cell = shiftin1->users.front().cell;
+                        else slave_cell = shiftin2->users.front().cell;
+                        slave_cell->attrs[id_BEL] = slave_bel_name;
+                    }
                 } else if (ofb->users.size() == 1 && ofb->users.at(0).cell->type == ctx->id("ISERDESE2")) {
                     unconstrained_oserdes.insert(ci);
                 } else {
