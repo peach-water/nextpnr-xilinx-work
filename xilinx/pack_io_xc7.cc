@@ -858,6 +858,7 @@ void XC7Packer::pack_iologic()
                         if (shiftin1 != nullptr) slave_cell = shiftin1->users.front().cell;
                         else slave_cell = shiftin2->users.front().cell;
                         slave_cell->attrs[id_BEL] = slave_bel_name;
+                        used_oserdes_bels.insert(ctx->getBelByName(ctx->id(slave_bel_name)));
                     }
                 } else if (ofb->users.size() == 1 && ofb->users.at(0).cell->type == ctx->id("ISERDESE2")) {
                     unconstrained_oserdes.insert(ci);
