@@ -950,6 +950,17 @@ struct FasmBackend
                 write_bit("SSTL12_SSTL135_SSTL15.IN");
         }
 
+        // IN_TERM.NONE and IN_ONLY for TMDS_33 output, e.g. HDMI signals
+        if (is_output && is_diff) {
+            if (is_tmds33 && yLoc == 1) {
+                if (pad->attrs.count(ctx->id("IN_TERM")))
+                    write_bit("IN_TERM." + pad->attrs.at(ctx->id("IN_TERM")).as_string());
+                else
+                    write_bit("IN_TERM.NONE");
+                write_bit("LVCMOS12_LVCMOS15_LVCMOS18_LVCMOS25_LVCMOS33_LVDS_25_LVTTL_SSTL135_SSTL15_TMDS_33.IN_ONLY");
+            }
+        }
+
         write_bit("PULLTYPE." + pulltype);
         pop(); // IOB_YN
 
