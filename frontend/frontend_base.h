@@ -443,6 +443,9 @@ template <typename FrontendType> struct GenericFrontend
     // Import a leaf cell - (white|black)box
     void import_leaf_cell(HierModuleState &m, const std::string &name, const cell_dat_t &cd)
     {
+        auto cellType = impl.get_cell_type(cd);
+        if (cellType == "$scopeinfo" || cellType == "$print" || cellType == "$check")
+            return;
         IdString inst_name = unique_name(m.prefix, name, false);
         ctx->hierarchy[m.path].leaf_cells_by_gname[inst_name] = ctx->id(name);
         ctx->hierarchy[m.path].leaf_cells[ctx->id(name)] = inst_name;
