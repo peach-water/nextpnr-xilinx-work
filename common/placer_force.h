@@ -1,7 +1,7 @@
 
 
-#ifndef PLACE_H
-#define PLACE_H
+#ifndef PLACE_FORCE_H
+#define PLACE_FORCE_H
 
 #include "log.h"
 #include "nextpnr.h"

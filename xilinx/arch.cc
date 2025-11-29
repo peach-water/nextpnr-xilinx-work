@@ -27,6 +27,7 @@
 #include "log.h"
 #include "nextpnr.h"
 #include "placer1.h"
+#include "placer_force.h"
 #include "placer_heap.h"
 #include "router1.h"
 #include "router2.h"
@@ -677,6 +678,9 @@ bool Arch::place()
             return false;
     } else if (placer == "sa") {
         if (!placer1(getCtx(), Placer1Cfg(getCtx())))
+            return false;
+    } else if (placer == "force") {
+        if (!placer_force(getCtx(), PlacerFCfg(getCtx())))
             return false;
     } else {
         log_error("US+ architecture does not support placer '%s'\n", placer.c_str());
@@ -1393,7 +1397,7 @@ const std::string Arch::defaultPlacer = "heap";
 const std::string Arch::defaultPlacer = "sa";
 #endif
 
-const std::vector<std::string> Arch::availablePlacers = {"sa",
+const std::vector<std::string> Arch::availablePlacers = {"sa", "force",
 #ifdef WITH_HEAP
                                                          "heap"
 #endif

@@ -40,6 +40,60 @@ class ForcePlacer
         }
     };
 
+    struct MoveChangeData
+    {
+        enum BoundChangeType
+        {
+            NO_CHANGE,
+            CELL_MOVED_INWARDS,
+            CELL_MOVEC_OUTWARDS,
+            FULL_RECOMPUTE
+        };
+
+        std::vector<decltype(NetInfo::udata)> bounds_changed_net_x, bounds_changed_net_y;
+        std::vector<std::pair<decltype(NetInfo::udata), size_t>> changed_arcs;
+
+        std::vector<BoundChangeType> already_bounds_changed_x, already_bounds_changed_y;
+        std::vector<std::vector<bool>> already_changed_arcs;
+
+        std::vector<BoundingBox> new_net_bounds;
+        std::vector<std::pair<std::pair<decltype(NetInfo::udata), size_t>, double>> new_arc_costs;
+
+        wirelen_t wirelen_delta = 0;
+        double timing_delta = 0;
+
+        void init(ForcePlacer *p)
+        {
+            already_bounds_changed_x.resize(p->ctx->nets.size());
+            already_bounds_changed_y.resize(p->ctx->nets.size());
+            already_changed_arcs.resize(p->ctx->nets.size());
+            for (auto &net : p->ctx->nets) {
+                already_changed_arcs.at(net.second->udata).resize(net.second->users.size());
+            }
+            new_net_bounds = p->net_bounds;
+        }
+
+        void reset(ForcePlacer *p)
+        {
+            for (auto bc : bounds_changed_net_x) {
+                new_net_bounds[bc] = p->net_bounds[bc];
+                already_bounds_changed_x[bc] = NO_CHANGE;
+            }
+            for (auto bc : bounds_changed_net_y) {
+                new_net_bounds[bc] = p->net_bounds[bc];
+                already_bounds_changed_y[bc] = NO_CHANGE;
+            }
+            for (const auto &tc : changed_arcs)
+                already_changed_arcs[tc.first][tc.second] = false;
+            bounds_changed_net_x.clear();
+            bounds_changed_net_y.clear();
+            changed_arcs.clear();
+            new_arc_costs.clear();
+            wirelen_delta = 0;
+            timing_delta = 0;
+        }
+    } moveChange;
+
   public:
     ForcePlacer(Context *ctx, PlacerFCfg cfg) : ctx(ctx), cfg(cfg)
     {
@@ -132,7 +186,7 @@ class ForcePlacer
     }
 
     // 布局算法
-    void place()
+    bool place()
     {
         log_break();
         ctx->lock();
@@ -179,7 +233,7 @@ class ForcePlacer
             }
         }
         int constr_placed_cells = placed_cells;
-        log_info("Placed %d cells based on constraints.\n", placed_cells);
+        log_info("Placed %d cells based on constraints.\n", int(placed_cells));
         ctx->yield();
 
         // 初始化未放置的CELL的位置
@@ -199,7 +253,8 @@ class ForcePlacer
             placeInital(cell);
             placed_cells++;
             if ((placed_cells - constr_placed_cells) % 500 == 0)
-                log_info("  initial placement placed %d/%d cells.\n", int(placed_cells - constr_placed_cells));
+                log_info("  initial placement placed %d/%d cells.\n", int(placed_cells - constr_placed_cells),
+                         int(autoplaced.size()));
         }
         if ((placed_cells - constr_placed_cells) % 500 != 0)
             log_info("  initial placement placed %d/%d cells.\n", int(placed_cells - constr_placed_cells),
@@ -214,23 +269,71 @@ class ForcePlacer
                  std::chrono::duration<float>(place_end_time_anchor_point - place_start_time_anchor_point).count());
         log_info("Runing Force placer.\n");
         // placer初始化结束
+        // =========================================================================================================
 
+        // =========================================================================================================
         // placer正式算法开始
         place_start_time_anchor_point = std::chrono::high_resolution_clock::now();
         if (!cfg.budgetBased)
             get_criticalities(ctx, &net_crit);
-        
+
         // 计算初始代价
         setupCost();
         // 移动控制
-
+        moveChange.init(this);
         // 计算线长开销与延迟开销
-        
+        curr_wirelen_cost = totalWirelenCost();
+        curr_timing_cost = totalTimingCost();
+        last_wirelen_cost = curr_wirelen_cost;
+        last_timing_cost = curr_timing_cost;
+
+        // if (cfg.netShareWeight > 0)
+        //     setupNetsByTile()
+
+        wirelen_t avg_wirelen = curr_wirelen_cost;
+        wirelen_t min_wirelen = curr_wirelen_cost;
+
+        int n_no_progress = 0;
+        bool improved = false;
+        // 算法主循环逻辑
+        for (int iter = 1;; iter++) {
+
+            if (!improved)
+                break;
+            ctx->yield();
+        }
 
         place_end_time_anchor_point = std::chrono::high_resolution_clock::now();
+        log_info("Force placement time %.2fs.\n",
+                 std::chrono::duration<float>(place_end_time_anchor_point - place_start_time_anchor_point).count());
+        ctx->yield();
 
+        // 最后检查布局合法性
+        log_info("Final placement valided check.\n");
+        for (auto bel : ctx->getBels()) {
+            CellInfo *cell = ctx->getBoundBelCell(bel);
+            if (!ctx->isBelLocationValid(bel)) {
+                std::string cell_text = "no cell";
+                if (cell != nullptr)
+                    cell_text = std::string("cell \'") + ctx->nameOf(cell) + "\'";
+                if (ctx->force) {
+                    log_warning("placement validity check failed for Bel \'%s\' (%s)\n",
+                                ctx->getBelName(bel).c_str(ctx), cell_text.c_str());
+                } else {
+                    log_error("placement validity check failed for Bel \'%s\' (%s)\n", ctx->getBelName(bel).c_str(ctx),
+                              cell_text.c_str());
+                }
+            }
+        }
+        for (auto cell : sorted(ctx->cells)) {
+            if (get_constraints_distance(ctx, cell.second) != 0)
+                log_error("constraint satisfaction check failed for cell \'%s\' at Bel \'%s\'.\n",
+                          cell.first.c_str(ctx), ctx->getBelName(cell.second->bel).c_str(ctx));
+        }
+        timing_analysis(ctx);
 
         ctx->unlock();
+        return true;
     }
 
   private:
@@ -303,20 +406,22 @@ class ForcePlacer
     }
 
     // 初始化代价 map
-    void setupCost() {
+    void setupCost()
+    {
         for (auto net : sorted(ctx->nets)) {
             NetInfo *ni = net.second;
             if (ignoreNet(ni)) // 不需要关心的net
                 continue;
             net_bounds[ni->udata] = getNetBounds(ni);
             if (cfg.timing_driven && int(ni->users.size()) < cfg.timingFanoutThresh)
-                for (size_t i = 0; i < ni->users.size(); i++) 
+                for (size_t i = 0; i < ni->users.size(); i++)
                     net_arc_tcost[ni->udata][i] = getTimingCost(ni, i);
         }
     }
 
     // 计算net中到特定端口的延迟
-    inline double getTimingCost(NetInfo* net, size_t user) {
+    inline double getTimingCost(NetInfo *net, size_t user)
+    {
         int cc;
         if (net->driver.cell == nullptr)
             return 0;
@@ -324,7 +429,7 @@ class ForcePlacer
             return 0;
         if (cfg.budgetBased) {
             double delay = ctx->getDelayNS(ctx->predictDelay(net, net->users.at(user)));
-            return std::min(10.0, std::exp(delay - ctx->getDelayNS(net->users.at(user).budget)/10));
+            return std::min(10.0, std::exp(delay - ctx->getDelayNS(net->users.at(user).budget) / 10));
         }
         auto crit = net_crit.find(net->name); // 找到延迟惩罚项
         if (crit == net_crit.end() || crit->second.criticality.empty())
@@ -334,37 +439,43 @@ class ForcePlacer
     }
 
     // 计算net的最小包围盒
-    inline BoundingBox getNetBounds(NetInfo* net){
+    inline BoundingBox getNetBounds(NetInfo *net)
+    {
         BoundingBox bb;
         NPNR_ASSERT(net->driver.cell != nullptr);
         Loc dloc = ctx->getBelLocation(net->driver.cell->bel);
-        bb.x0, bb.x1 = dloc.x, dloc.x;
-        bb.y0, bb.y1 = dloc.y, dloc.y;
-        bb.nx0, bb.nx1, bb.ny0, bb.ny1 = 1,1,1,1;
+        bb.x0 = dloc.x;
+        bb.x1 = dloc.x;
+        bb.y0 = dloc.y;
+        bb.y1 = dloc.y;
+        bb.nx0 = 1;
+        bb.nx1 = 1;
+        bb.ny0 = 1;
+        bb.ny1 = 1;
         for (auto user : net->users) {
             if (user.cell->bel == BelId())
                 continue;
             Loc uloc = ctx->getBelLocation(user.cell->bel);
             if (uloc.x == bb.x0)
-                bb.nx0 ++;
-            else if (uloc.x < bb.x0){
+                bb.nx0++;
+            else if (uloc.x < bb.x0) {
                 bb.x0 = uloc.x;
                 bb.nx0 = 1;
             }
             if (uloc.x == bb.x1)
-                bb.nx1 ++;
+                bb.nx1++;
             else if (uloc.x > bb.x1) {
                 bb.x1 = uloc.x;
                 bb.nx1 = 1;
             }
             if (uloc.y == bb.y0)
-                bb.ny0 ++;
+                bb.ny0++;
             else if (uloc.y < bb.y0) {
                 bb.y0 = uloc.y;
                 bb.ny0 = 1;
             }
             if (uloc.y == bb.y1)
-                bb.ny1 ++;
+                bb.ny1++;
             else if (uloc.y > bb.y1) {
                 bb.y1 = uloc.y;
                 bb.ny1 = 1;
@@ -374,12 +485,15 @@ class ForcePlacer
     }
 
     // 判断net是否有记录代价的必要，比如没有驱动port的net就没有意义
-    inline bool ignoreNet(NetInfo *net) {
-        return net->driver.cell == nullptr || net->driver.cell->bel == BelId() || ctx->getBelGlobalBuf(net->driver.cell->bel);
+    inline bool ignoreNet(NetInfo *net)
+    {
+        return net->driver.cell == nullptr || net->driver.cell->bel == BelId() ||
+               ctx->getBelGlobalBuf(net->driver.cell->bel);
     }
 
     // 计算总线长开销
-    wirelen_t totalWirelenCost() {
+    wirelen_t totalWirelenCost()
+    {
         wirelen_t cost = 0;
         for (const auto &net : net_bounds)
             cost += net.hpwl(cfg);
@@ -387,7 +501,8 @@ class ForcePlacer
     }
 
     // 计算延迟开销
-    double totalTimingCost() {
+    double totalTimingCost()
+    {
         double cost = 0.0f;
         for (const auto &net : net_arc_tcost) {
             for (auto arc_cost : net) {
@@ -401,6 +516,8 @@ class ForcePlacer
     Context *ctx;
     PlacerFCfg cfg;
     float crit_exp = 8.0f;
+    wirelen_t curr_wirelen_cost, last_wirelen_cost;
+    double last_timing_cost, curr_timing_cost;
 
     int diameter = 35, max_x = 1, max_y = 1; // diameter 控制交换空间范围，不确定是否有必要保留
     // 部分网络限制其边界框大小，从而跳过移动到边界框外的无效步骤
