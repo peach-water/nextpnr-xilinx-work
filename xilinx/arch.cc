@@ -680,7 +680,8 @@ bool Arch::place()
         if (!placer1(getCtx(), Placer1Cfg(getCtx())))
             return false;
     } else if (placer == "force") {
-        if (!placer_force(getCtx(), PlacerFCfg(getCtx())))
+        PlacerFCfg cfg(getCtx());
+        if (!placer_force(getCtx(), cfg))
             return false;
     } else {
         log_error("US+ architecture does not support placer '%s'\n", placer.c_str());
