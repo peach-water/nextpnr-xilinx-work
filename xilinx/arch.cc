@@ -681,6 +681,12 @@ bool Arch::place()
             return false;
     } else if (placer == "force") {
         PlacerFCfg cfg(getCtx());
+        cfg.ioBufTypes.insert(id("IOB_IBUFCTRL"));
+        cfg.ioBufTypes.insert(id("IOB_OUTBUF"));
+        cfg.ioBufTypes.insert(id_PSEUDO_GND);
+        cfg.ioBufTypes.insert(id_PSEUDO_VCC);
+        cfg.phi = 1.0;
+        cfg.gamma = 1.0;
         if (!placer_force(getCtx(), cfg))
             return false;
     } else {

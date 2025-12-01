@@ -18,6 +18,9 @@ struct PlacerFCfg {
     bool timing_driven;
     int slack_redist_iter;
     int hpwl_scale_x, hpwl_scale_y;
+
+    std::unordered_set<IdString> ioBufTypes;
+    double phi, gamma; // star算法计算S的参数
 };
 
 extern bool placer_force(Context *ctx, PlacerFCfg cfg);

@@ -42,60 +42,6 @@ class ForcePlacer
         }
     };
 
-    struct MoveChangeData
-    {
-        enum BoundChangeType
-        {
-            NO_CHANGE,
-            CELL_MOVED_INWARDS,
-            CELL_MOVEC_OUTWARDS,
-            FULL_RECOMPUTE
-        };
-
-        std::vector<decltype(NetInfo::udata)> bounds_changed_net_x, bounds_changed_net_y;
-        std::vector<std::pair<decltype(NetInfo::udata), size_t>> changed_arcs;
-
-        std::vector<BoundChangeType> already_bounds_changed_x, already_bounds_changed_y;
-        std::vector<std::vector<bool>> already_changed_arcs;
-
-        std::vector<BoundingBox> new_net_bounds;
-        std::vector<std::pair<std::pair<decltype(NetInfo::udata), size_t>, double>> new_arc_costs;
-
-        wirelen_t wirelen_delta = 0;
-        double timing_delta = 0;
-
-        void init(ForcePlacer *p)
-        {
-            already_bounds_changed_x.resize(p->ctx->nets.size());
-            already_bounds_changed_y.resize(p->ctx->nets.size());
-            already_changed_arcs.resize(p->ctx->nets.size());
-            for (auto &net : p->ctx->nets) {
-                already_changed_arcs.at(net.second->udata).resize(net.second->users.size());
-            }
-            new_net_bounds = p->net_bounds;
-        }
-
-        void reset(ForcePlacer *p)
-        {
-            for (auto bc : bounds_changed_net_x) {
-                new_net_bounds[bc] = p->net_bounds[bc];
-                already_bounds_changed_x[bc] = NO_CHANGE;
-            }
-            for (auto bc : bounds_changed_net_y) {
-                new_net_bounds[bc] = p->net_bounds[bc];
-                already_bounds_changed_y[bc] = NO_CHANGE;
-            }
-            for (const auto &tc : changed_arcs)
-                already_changed_arcs[tc.first][tc.second] = false;
-            bounds_changed_net_x.clear();
-            bounds_changed_net_y.clear();
-            changed_arcs.clear();
-            new_arc_costs.clear();
-            wirelen_delta = 0;
-            timing_delta = 0;
-        }
-    } moveChange;
-
     // 在布局算法初期允许cell自由移动
     struct CellLocation
     {
@@ -112,6 +58,19 @@ class ForcePlacer
             rawx = double(x);
             rawy = double(y);
         }
+        void legal()
+        {
+            legal_x = x;
+            legal_y = y;
+        }
+    };
+
+    // Star算法中间变量
+    struct NetStar
+    {
+        double xc, yc;                     // 线网的平均中心，xc = sum(x_i) / len(net) ，其中x_i为所有相连port的位置
+        double x_divergence, y_divergence; // Divergence = \sqrt{sum((x_i - xc)^2) + 1} ，参考star+算法的S变量
+        int net_len;                       // net中链接的Cell数量
     };
 
   public:
@@ -255,33 +214,15 @@ class ForcePlacer
                 cell_locs[cell->name].global = ctx->getBelGlobalBuf(cell->bel);
             }
         }
-        int constr_placed_cells = placed_cells_count;
+
         log_info("Placed %d cells based on constraints.\n", int(placed_cells_count));
         ctx->yield();
 
-        // 初始化未放置的CELL的位置
-        // 找出所有未放置的cell对象
-        for (auto &cell : ctx->cells) {
-            CellInfo *ci = cell.second.get();
-            if (hasMeanfulConnectivity(ci) && !cell_locs[ci->name].locked) {
-                place_cells.push_back(ci);
-            }
-        }
-        // std::sort(autoplaced.begin(), autoplaced.end(), [](CellInfo *a, CellInfo *b) { return a->name < b->name; });
-        ctx->shuffle(place_cells);
+        seedPlacement();
+        updateAllChain();
         log_info("Creating initial placement for remaining %d cells.\n", int(place_cells.size()));
         auto place_start_time_anchor_point = std::chrono::high_resolution_clock::now(); // 开始计时锚点
-        // 随机初始化放置
-        for (auto cell : place_cells) {
-            placeInital(cell);
-            placed_cells_count++;
-            if ((placed_cells_count - constr_placed_cells) % 500 == 0)
-                log_info("  initial placement placed %d/%d cells.\n", int(placed_cells_count - constr_placed_cells),
-                         int(place_cells.size()));
-        }
-        if ((placed_cells_count - constr_placed_cells) % 500 != 0)
-            log_info("  initial placement placed %d/%d cells.\n", int(placed_cells_count - constr_placed_cells),
-                     int(place_cells.size()));
+
         // 暂时不确定用途，应该是计算时序约束
         if (cfg.budgetBased && cfg.slack_redist_iter > 0)
             assign_budget(ctx);
@@ -310,10 +251,8 @@ class ForcePlacer
         if (!cfg.budgetBased)
             get_criticalities(ctx, &net_crit);
 
-        // 计算初始代价
+        // 初始化代价查找表
         setupCost();
-        // 移动控制
-        moveChange.init(this);
         // 计算线长开销与延迟开销
         curr_wirelen_cost = totalWirelenCost();
         curr_timing_cost = totalTimingCost();
@@ -332,17 +271,28 @@ class ForcePlacer
         // 算法主循环逻辑
         log_info("Runing Force placer.\n");
         for (int iter = 1;; iter++) {
-
+            updateAllNetStar();
+            solveAllCellPosition();
+            legalisePlacementStrict();
+            curr_wirelen_cost = totalWirelenCost();
+            log_info("iter %3d: wirelength: %ld.\n", iter, curr_wirelen_cost);
+            improved = curr_wirelen_cost < last_wirelen_cost;
+            last_wirelen_cost = curr_wirelen_cost;
             if (!improved)
                 break;
             ctx->yield();
         }
+        legalisePlacementStrict(true);
 
         place_end_time_anchor_point = std::chrono::high_resolution_clock::now();
         log_break();
         log_info("Force placement time: %.2fs.\n",
                  std::chrono::duration<float>(place_end_time_anchor_point - place_start_time_anchor_point).count());
         log_info("  of legalisation: %.2fs\n", legalise_time);
+
+        curr_wirelen_cost = totalWirelenCost();
+        log_break();
+        log_info("Force placement wirelen = %ld.\n", curr_wirelen_cost);
         ctx->yield();
 
         // 最后检查布局合法性
@@ -383,7 +333,7 @@ class ForcePlacer
     // 合法化过程，在布局算法运行后执行
     void legalisePlacementStrict(bool require_validity = false)
     {
-        bool debug_this = true;
+        bool debug_this = false;
         auto legalise_start_time_anchor_point = std::chrono::high_resolution_clock::now();
 
         // 解除所有绑定，务必注意不要把约束文件定义的结果解绑
@@ -391,7 +341,6 @@ class ForcePlacer
         for (auto cell : sorted(ctx->cells)) {
             CellInfo *ci = cell.second;
             if (ci->bel != BelId() && (ci->belStrength < STRENGTH_USER)) {
-                cell_locs[ci->name] = CellLocation(ctx->getBelLocation(ci->bel));
                 ctx->unbindBel(ci->bel);
                 remaining.push(ci->name);
             }
@@ -411,7 +360,8 @@ class ForcePlacer
             CellLocation cloc = cell_locs[ci->name];
             if (ci->bel != BelId())
                 continue;
-            log_info(" Legalising %s (%s).\n", top.c_str(ctx), ci->type.c_str(ctx));
+            if (debug_this)
+                log_info(" Legalising %s (%s).\n", top.c_str(ctx), ci->type.c_str(ctx));
             int bt = std::get<0>(bel_types.at(ci->type));
             auto &fb = fast_bels[bt];
             int radius = 0;
@@ -501,7 +451,9 @@ class ForcePlacer
                     }
                     ctx->bindBel(best_bel, ci, STRENGTH_WEAK);
                     placed = true;
-                    cell_locs[ci->name] = CellLocation(ctx->getBelLocation(best_bel));
+                    Loc loc = ctx->getBelLocation(best_bel);
+                    cell_locs[ci->name].x = loc.x;
+                    cell_locs[ci->name].y = loc.y;
                     break;
                 }
 
@@ -548,7 +500,9 @@ class ForcePlacer
                             } else {
                                 if (bound != nullptr)
                                     remaining.emplace(bound->name);
-                                cell_locs[ci->name] = CellLocation(ctx->getBelLocation(sz));
+                                Loc loc = ctx->getBelLocation(sz);
+                                cell_locs[ci->name].x = loc.x;
+                                cell_locs[ci->name].y = loc.y;
                                 if (debug_this)
                                     std::cerr << " ==> placed w/o constraints! \n";
                                 placed = true;
@@ -622,7 +576,8 @@ class ForcePlacer
                         }
                         for (auto &target : targets) {
                             Loc loc = ctx->getBelLocation(target.second);
-                            cell_locs[target.first->name] = CellLocation(loc);
+                            cell_locs[target.first->name].x = loc.x;
+                            cell_locs[target.first->name].y = loc.y;
                             if (debug_this)
                                 log_info("%s %d %d %d\n", target.first->name.c_str(ctx), loc.x, loc.y, loc.z);
                         }
@@ -645,72 +600,53 @@ class ForcePlacer
     }
 
     // 随机初始化放置
-    void placeInital(CellInfo *cell)
+    void seedPlacement()
     {
-        bool all_placed = false;
-        int iters = 25; // 尝试25次
-        while (!all_placed) {
-            BelId best_bel = BelId();
-            uint64_t best_score = std::numeric_limits<uint64_t>::max(),
-                     best_ripup_score = std::numeric_limits<uint64_t>::max();
-            // 无视资源限制的虚拟BEL位置。当物理BEL因为各种原因无法放置时（比如部分资源被占用），会清理掉虚拟BEL上已放置的所有cell，放置当前cell。
-            CellInfo *ripup_target = nullptr; // 被驱赶的cell本体
-            BelId ripup_bel = BelId();        // 被驱赶的cell占据的bel对象
-            if (cell->bel != BelId()) {
-                ctx->unbindBel(cell->bel);
-            }
-            IdString target_type = cell->type;
-
-            auto proc_bel = [&](BelId bel) {
-                if (ctx->getBelType(bel) == target_type && ctx->isValidBelForCell(cell, bel)) {
-                    if (ctx->checkBelAvail(bel)) {
-                        uint64_t score = ctx->rng64();
-                        if (score < best_score) {
-                            best_score = score;
-                            best_bel = bel;
-                        }
+        std::unordered_map<IdString, std::deque<BelId>> available_bels;
+        for (auto bel : ctx->getBels()) {
+            if (!ctx->checkBelAvail(bel))
+                continue;
+            available_bels[ctx->getBelType(bel)].push_back(bel);
+        }
+        for (auto &t : available_bels) {
+            std::random_shuffle(t.second.begin(), t.second.end(), [&](size_t n) { return ctx->rng(int(n)); });
+        }
+        for (auto cell : sorted(ctx->cells)) {
+            CellInfo *ci = cell.second;
+            if (ci->bel != BelId()) {
+                Loc loc = ctx->getBelLocation(ci->bel);
+                CellLocation cloc(loc);
+                cloc.locked = true;
+                cloc.global = ctx->getBelGlobalBuf(ci->bel);
+                cell_locs[ci->name] = cloc;
+            } else if (ci->constr_parent == nullptr) {
+                bool placed = false;
+                while (!placed) {
+                    if (!available_bels.count(ci->type) || available_bels.at(ci->type).empty())
+                        log_error("Unable to place cell \'$%s\', no Bels remaining of type \'%s\'.\n",
+                                  ci->name.c_str(ctx), ci->type.c_str(ctx));
+                    BelId bel = available_bels.at(ci->type).back();
+                    available_bels.at(ci->type).pop_back();
+                    Loc loc = ctx->getBelLocation(bel);
+                    CellLocation cloc(loc);
+                    cloc.locked = false;
+                    cloc.global = ctx->getBelGlobalBuf(bel);
+                    cell_locs[ci->name] = cloc;
+                    if (hasMeanfulConnectivity(ci) && !cfg.ioBufTypes.count(ci->type)) {
+                        place_cells.push_back(ci);
+                        placed = true;
+                        ctx->bindBel(bel, ci, STRENGTH_WEAK);
                     } else {
-                        uint64_t score = ctx->rng64();
-                        CellInfo *bound_cell = ctx->getBoundBelCell(bel);
-                        // 判断绑定强度小于STRENGTH_STRONG，避免驱赶cell时驱赶了约束文件规定的cell
-                        if (score <= best_ripup_score && bound_cell->belStrength < STRENGTH_STRONG) {
-                            best_ripup_score = score;
-                            ripup_target = bound_cell;
-                            ripup_bel = bel;
+                        if (ctx->isValidBelForCell(ci, bel)) {
+                            ctx->bindBel(bel, ci, STRENGTH_STRONG);
+                            cell_locs[ci->name].locked = true;
+                            placed = true;
+                        } else {
+                            available_bels.at(ci->type).push_front(bel);
                         }
                     }
                 }
-            };
-
-            // 如果有区域限制，那就从限制区域的bel尝试，否则从全局遍历的bel尝试
-            if (cell->region != nullptr && cell->region->constr_bels) {
-                for (auto bel : cell->region->bels) {
-                    proc_bel(bel);
-                }
-            } else {
-                for (auto bel : ctx->getBels()) {
-                    proc_bel(bel);
-                }
             }
-
-            // 当初始化放置失败时
-            if (best_bel == BelId()) {
-                if (iters == 0 || ripup_bel == BelId())
-                    log_error("failed to initlize place cell \'%s\' of type \'%s\'.\n", cell->name.c_str(ctx),
-                              cell->type.c_str(ctx));
-                --iters;
-                // 鸠占鹊巢
-                ctx->unbindBel(ripup_target->bel);
-                best_bel = ripup_bel;
-            } else {
-                all_placed = true;
-            }
-            ctx->bindBel(best_bel, cell, STRENGTH_WEAK);
-
-            cell->attrs[ctx->id("BEL")] = ctx->getBelName(cell->bel).str(ctx);
-            cell_locs[cell->name] = CellLocation(ctx->getBelLocation(cell->bel));
-            cell_locs[cell->name].global = ctx->getBelGlobalBuf(best_bel);
-            cell = ripup_target; // 现在开始处理被驱赶的对象
         }
     }
 
@@ -719,6 +655,10 @@ class ForcePlacer
     {
         for (auto net : sorted(ctx->nets)) {
             NetInfo *ni = net.second;
+            // FIXME 移动到ignoreNet判断之后会导致updateNetStar出现段错误，即访问了属于ignoreNet的net
+            net_star_infos[ni->name] = NetStar();
+            net_star_infos[ni->name].net_len = int(ni->users.size());
+            net_star_infos[ni->name].net_len += ni->driver.cell == nullptr ? 0 : 1;
             if (ignoreNet(ni)) // 不需要关心的net
                 continue;
             net_bounds[ni->udata] = getNetBounds(ni);
@@ -846,7 +786,7 @@ class ForcePlacer
         return cost;
     }
 
-#if 0
+#if 1
     // 更新链接的子节点
     void updateChain(CellInfo *cell, CellInfo *root)
     {
@@ -880,6 +820,86 @@ class ForcePlacer
     }
 #endif
 
+    // 更新net的分布中心点信息和散度信息
+    void updateNetStar(NetInfo *net)
+    {
+        // if (net == nullptr || net->driver.cell != nullptr || net->users.empty())
+        if (net == nullptr)
+            return;
+        NetStar &ns = net_star_infos.at(net->name);
+        double square_x_sum = 0.0, square_y_sum = 0.0; // sum(x_i^2)
+        double x_sum = 0.0, y_sum = 0;                 // sum(x_i)
+        if (net->driver.cell != nullptr) {
+            CellInfo *ci = net->driver.cell;
+            CellLocation cloc = cell_locs[ci->name];
+            square_x_sum = double(cloc.x * cloc.x);
+            square_y_sum = double(cloc.y * cloc.y);
+            x_sum = double(cloc.x);
+            y_sum = double(cloc.y);
+        }
+        for (const auto &cell : net->users) {
+            CellInfo *ci = cell.cell;
+            CellLocation cloc = cell_locs[ci->name];
+            square_x_sum += double(cloc.x * cloc.x);
+            square_y_sum += double(cloc.y * cloc.y);
+            x_sum += double(cloc.x);
+            y_sum += double(cloc.y);
+        }
+        NPNR_ASSERT(cfg.phi > 0);
+        NPNR_ASSERT(cfg.gamma > 0);
+        ns.x_divergence = std::sqrt(square_x_sum - x_sum * x_sum / double(ns.net_len) + cfg.phi) * cfg.gamma;
+        ns.y_divergence = std::sqrt(square_y_sum - y_sum * y_sum / double(ns.net_len) + cfg.phi) * cfg.gamma;
+        ns.xc = x_sum / double(ns.net_len);
+        ns.yc = y_sum / double(ns.net_len);
+    }
+
+    // 更新所有net的star算法信息
+    void updateAllNetStar()
+    {
+        for (const auto &net : sorted(ctx->nets)) {
+            NetInfo *ni = net.second;
+            if (ni == nullptr || ni->driver.cell == nullptr || ni->driver.cell->bel == BelId())
+                continue;
+            updateNetStar(ni);
+        }
+    }
+
+    // 求解单个cell的新位置
+    void solveCellPosition(CellInfo *cell)
+    {
+        CellLocation &cloc = cell_locs[cell->name];
+        double net_divergence_sum_x = 0.0, net_divergence_sum_y = 0.0;
+        double next_rawx = 0.0, next_rawy = 0.0;
+        for (auto port : cell->ports) {
+            PortInfo pi = port.second;
+            NetInfo *ni = pi.net;
+            if (ni == nullptr || ni->driver.cell == nullptr || ni->driver.cell->bel == BelId())
+                continue;
+            NetStar ns = net_star_infos[ni->name];
+            next_rawx += ns.xc / ns.x_divergence;
+            next_rawy += ns.yc / ns.y_divergence;
+            net_divergence_sum_x += 1.0 / ns.x_divergence;
+            net_divergence_sum_y += 1.0 / ns.y_divergence;
+        }
+        NPNR_ASSERT(net_divergence_sum_x > 0);
+        NPNR_ASSERT(net_divergence_sum_y > 0);
+        cloc.rawx = next_rawx / net_divergence_sum_x;
+        cloc.rawy = next_rawy / net_divergence_sum_y;
+
+        cloc.x = int(cloc.rawx);
+        cloc.y = int(cloc.rawy);
+    }
+
+    // 更新所有cell的新位置
+    void solveAllCellPosition()
+    {
+        for (auto cell : place_cells) {
+            if (cell_locs.at(cell->name).global)
+                continue;
+            solveCellPosition(cell);
+        }
+    }
+
     // 基本信息
     Context *ctx;
     PlacerFCfg cfg;
@@ -891,6 +911,7 @@ class ForcePlacer
     int diameter = 35, max_x = 1, max_y = 1; // diameter 控制交换空间范围，不确定是否有必要保留
     // 部分网络限制其边界框大小，从而跳过移动到边界框外的无效步骤
     std::vector<BoundingBox> net_bounds;
+    std::unordered_map<IdString, NetStar> net_star_infos;
     // 部分线网的时钟惩罚（criticality * delay ns）
     std::vector<std::vector<double>> net_arc_tcost;
 
