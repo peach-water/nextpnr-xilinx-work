@@ -685,6 +685,8 @@ bool Arch::place()
         cfg.ioBufTypes.insert(id("IOB_OUTBUF"));
         cfg.ioBufTypes.insert(id_PSEUDO_GND);
         cfg.ioBufTypes.insert(id_PSEUDO_VCC);
+        cfg.hpwl_scale_y = 1;
+        cfg.hpwl_scale_x = 1;
         cfg.phi = 1.0;
         cfg.gamma = 1.0;
         if (!placer_force(getCtx(), cfg))

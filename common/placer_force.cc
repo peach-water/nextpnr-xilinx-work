@@ -74,95 +74,9 @@ class ForcePlacer
     };
 
   public:
-    ForcePlacer(Context *ctx, PlacerFCfg cfg) : ctx(ctx), cfg(cfg)
-    {
-        // 统计每种bel的数量和bel的种类
-        int num_bel_types = 0;
-        for (auto bel : ctx->getBels()) {
-            IdString type = ctx->getBelType(bel);
-            if (bel_types.find(type) == bel_types.end()) {
-                bel_types[type] = std::tuple<int, int>(num_bel_types++, 1);
-            } else {
-                std::get<1>(bel_types.at(type))++;
-            }
-        }
-        // 统计每类bel的位置，getbel得到一个bel的id，需要利用arch提供的getlocation和gettype得知id对应的BEL位置和类型
-        for (auto bel : ctx->getBels()) {
-            Loc loc = ctx->getBelLocation(bel);
-            IdString type = ctx->getBelType(bel);
-            int type_idx = std::get<0>(bel_types[type]);
-            int type_cnt = std::get<1>(bel_types[type]);
-            if (type_cnt < cfg.minBelsForGridPick) // 不太明白这一段的意义
-                loc.x = loc.y = 0;
-            if (int(fast_bels.size()) < type_idx + 1)
-                fast_bels.resize(type_idx + 1);
-            if (int(fast_bels.at(type_idx).size()) < (loc.x + 1))
-                fast_bels.at(type_idx).resize(loc.x + 1);
-            if (int(fast_bels.at(type_idx).at(loc.x).size()) < (loc.y + 1))
-                fast_bels.at(type_idx).at(loc.x).resize(loc.y + 1);
-            max_x = std::max(max_x, loc.x);
-            max_y = std::max(max_y, loc.y);
-            fast_bels.at(type_idx).at(loc.x).at(loc.y).push_back(bel);
-        }
-        diameter = std::max(max_x, max_y);
+    ForcePlacer(Context *ctx, PlacerFCfg cfg) : ctx(ctx), cfg(cfg) { buildFastBels(); }
 
-        // 获得net信息
-        net_bounds.resize(ctx->nets.size());
-        net_arc_tcost.resize(ctx->nets.size());
-        old_udata.reserve(ctx->nets.size());
-        net_by_udata.reserve(ctx->nets.size());
-        decltype(NetInfo::udata) n = 0;
-        for (auto &net : ctx->nets) {
-            old_udata.emplace_back(net.second->udata);            // 获得net的初始元信息
-            net_arc_tcost.at(n).resize(net.second->users.size()); // 获得链接信息
-            net.second->udata = n++;                              // 更新为布局算法内部元信息
-            net_by_udata.push_back(net.second.get());
-        }
-
-        // 获得区域信息
-        // SAPlacer是默认按照覆盖region内所有bel的最小区域为准，默认是覆盖全局
-        for (auto &region : sorted(ctx->region)) {
-            Region *r = region.second;
-            BoundingBox bb;
-            if (r->constr_bels) {
-                bb.x0 = std::numeric_limits<int>::max();
-                bb.x1 = std::numeric_limits<int>::min();
-                bb.y0 = std::numeric_limits<int>::max();
-                bb.y1 = std::numeric_limits<int>::min();
-                for (auto bel : r->bels) {
-                    Loc loc = ctx->getBelLocation(bel);
-                    bb.x0 = std::min(bb.x0, loc.x);
-                    bb.x1 = std::max(bb.x1, loc.x);
-                    bb.y0 = std::min(bb.y0, loc.y);
-                    bb.y1 = std::max(bb.y1, loc.y);
-                }
-            } else {
-                bb.x0 = 0;
-                bb.y0 = 0;
-                bb.x1 = max_x;
-                bb.y1 = max_y;
-            }
-            region_bounds[r->name] = bb;
-        }
-    }
-
-    ~ForcePlacer()
-    {
-        for (auto &net : ctx->nets)
-            net.second->udata = old_udata[net.second->udata]; // 恢复net的原始udata
-    }
-
-    // 建立cell port -> user index 的映射
-    void build_port_index()
-    {
-        for (auto net : sorted(ctx->nets)) {
-            NetInfo *ni = net.second;
-            for (size_t i = 0; i < ni->users.size(); i++) {
-                auto &usr = ni->users.at(i);
-                fast_port_to_user[&(usr.cell->ports.at(usr.port))] = i;
-            }
-        }
-    }
+    ~ForcePlacer() {}
 
     // 布局算法
     bool place()
@@ -208,7 +122,6 @@ class ForcePlacer
                 }
                 ctx->bindBel(bel, cell, STRENGTH_USER);
                 placed_cells_count++;
-                locked_bels.insert(bel);
                 cell_locs[cell->name] = CellLocation(ctx->getBelLocation(cell->bel));
                 cell_locs[cell->name].locked = true;
                 cell_locs[cell->name].global = ctx->getBelGlobalBuf(cell->bel);
@@ -252,10 +165,10 @@ class ForcePlacer
             get_criticalities(ctx, &net_crit);
 
         // 初始化代价查找表
-        setupCost();
+        setupStar();
         // 计算线长开销与延迟开销
         curr_wirelen_cost = totalWirelenCost();
-        curr_timing_cost = totalTimingCost();
+
         log_info("random placement wirelen = %ld.\n", curr_wirelen_cost);
         last_wirelen_cost = curr_wirelen_cost;
         last_timing_cost = curr_timing_cost;
@@ -263,19 +176,35 @@ class ForcePlacer
         // if (cfg.netShareWeight > 0)
         //     setupNetsByTile()
 
-        wirelen_t avg_wirelen = curr_wirelen_cost;
-        wirelen_t min_wirelen = curr_wirelen_cost;
+        wirelen_t solve_wirelen = curr_wirelen_cost;
+        wirelen_t spread_wirelen = curr_wirelen_cost;
+        wirelen_t legal_wirelen = curr_wirelen_cost;
 
         int n_no_progress = 0;
         bool improved = false;
         // 算法主循环逻辑
         log_info("Runing Force placer.\n");
+        setupSolveCells();
         for (int iter = 1;; iter++) {
+            auto solve_time_start_anchor_point = std::chrono::high_resolution_clock::now();
             updateAllNetStar();
             solveAllCellPosition();
-            legalisePlacementStrict();
-            curr_wirelen_cost = totalWirelenCost();
-            log_info("iter %3d: wirelength: %ld.\n", iter, curr_wirelen_cost);
+            auto solve_time_end_anchor_point = std::chrono::high_resolution_clock::now();
+            solve_time += std::chrono::duration<float>(solve_time_end_anchor_point - solve_time_start_anchor_point).count();
+            updateAllChain();
+            solve_wirelen = totalWirelenCost();
+            updateAllChain();
+            // 假设进行了扩散
+            spread_wirelen = totalWirelenCost();
+
+            // 合法化
+            legalisePlacementStrict(true);
+            updateAllChain();
+            legal_wirelen = totalWirelenCost();
+
+            curr_wirelen_cost = legal_wirelen;
+            log_info("  at iter #%3d: solve wirelength: %ld, spread wirelength: %ld, legal wirelength: %ld.\n", iter,
+                     solve_wirelen, spread_wirelen, legal_wirelen);
             improved = curr_wirelen_cost < last_wirelen_cost;
             last_wirelen_cost = curr_wirelen_cost;
             if (!improved)
@@ -289,6 +218,8 @@ class ForcePlacer
         log_info("Force placement time: %.2fs.\n",
                  std::chrono::duration<float>(place_end_time_anchor_point - place_start_time_anchor_point).count());
         log_info("  of legalisation: %.2fs\n", legalise_time);
+        log_info("  of solve: %.2fs.\n", solve_time);
+        log_info("  of spreading cells: %.2fs.\n", sl_time);
 
         curr_wirelen_cost = totalWirelenCost();
         log_break();
@@ -333,18 +264,21 @@ class ForcePlacer
     // 合法化过程，在布局算法运行后执行
     void legalisePlacementStrict(bool require_validity = false)
     {
-        bool debug_this = false;
+        const bool debug_this = false;
         auto legalise_start_time_anchor_point = std::chrono::high_resolution_clock::now();
 
         // 解除所有绑定，务必注意不要把约束文件定义的结果解绑
-        std::queue<IdString> remaining; // 记录不合法的对象
         for (auto cell : sorted(ctx->cells)) {
             CellInfo *ci = cell.second;
-            if (ci->bel != BelId() && (ci->belStrength < STRENGTH_USER)) {
+            if (ci->bel != BelId() && (ci->udata != dont_solve ||
+                                       (chain_root.count(ci->name) && chain_root.at(ci->name)->udata != dont_solve))) {
                 ctx->unbindBel(ci->bel);
-                remaining.push(ci->name);
             }
         }
+
+        std::queue<std::pair<int, IdString>> remaining;
+        for (auto cell : solve_cells)
+            remaining.emplace(chain_size[cell->name], cell->name);
 
         // 暂时采用贪心策略
         // TODO 将来采用更高级的合法化过程
@@ -356,12 +290,12 @@ class ForcePlacer
             auto top = remaining.front();
             remaining.pop();
 
-            CellInfo *ci = ctx->cells.at(top).get();
+            CellInfo *ci = ctx->cells.at(top.second).get();
             CellLocation cloc = cell_locs[ci->name];
             if (ci->bel != BelId())
                 continue;
             if (debug_this)
-                log_info(" Legalising %s (%s).\n", top.c_str(ctx), ci->type.c_str(ctx));
+                log_info(" Legalising %s (%s).\n", ci->name.c_str(ctx), ci->type.c_str(ctx));
             int bt = std::get<0>(bel_types.at(ci->type));
             auto &fb = fast_bels[bt];
             int radius = 0;
@@ -395,10 +329,14 @@ class ForcePlacer
 
                 if (ci->region != nullptr) {
                     // 有区域约束
-                    rx = std::min(radius,
-                                  (region_bounds[ci->region->name].x1 - region_bounds[ci->region->name].x0) / 2 + 1);
-                    ry = std::min(radius,
-                                  (region_bounds[ci->region->name].y1 - region_bounds[ci->region->name].y0) / 2 + 1);
+                    rx = std::min(radius, (constraint_region_bounds[ci->region->name].x1 -
+                                           constraint_region_bounds[ci->region->name].x0) /
+                                                          2 +
+                                                  1);
+                    ry = std::min(radius, (constraint_region_bounds[ci->region->name].y1 -
+                                           constraint_region_bounds[ci->region->name].y0) /
+                                                          2 +
+                                                  1);
                 }
                 // 随机找到约束范围内的一个BEL
 
@@ -447,7 +385,7 @@ class ForcePlacer
                     CellInfo *bound = ctx->getBoundBelCell(best_bel);
                     if (bound != nullptr) {
                         ctx->unbindBel(bound->bel);
-                        remaining.push(bound->name);
+                        remaining.emplace(chain_size[bound->name], bound->name);
                     }
                     ctx->bindBel(best_bel, ci, STRENGTH_WEAK);
                     placed = true;
@@ -499,7 +437,7 @@ class ForcePlacer
                                 break;
                             } else {
                                 if (bound != nullptr)
-                                    remaining.emplace(bound->name);
+                                    remaining.emplace(chain_size[bound->name], bound->name);
                                 Loc loc = ctx->getBelLocation(sz);
                                 cell_locs[ci->name].x = loc.x;
                                 cell_locs[ci->name].y = loc.y;
@@ -583,7 +521,7 @@ class ForcePlacer
                         }
                         for (auto &swap : swaps_made) {
                             if (swap.second != nullptr)
-                                remaining.emplace(swap.second->name);
+                                remaining.emplace(chain_size[swap.second->name], swap.second->name);
                         }
 
                         if (debug_this)
@@ -650,8 +588,94 @@ class ForcePlacer
         }
     }
 
-    // 初始化代价 map
-    void setupCost()
+    // 建立fast_bel和nearest_row_with_bel和newrest_col_with_bel
+    void buildFastBels()
+    {
+        int num_bel_types = 0;
+        for (auto bel : ctx->getBels()) {
+            IdString type = ctx->getBelType(bel);
+            if (bel_types.find(type) == bel_types.end()) {
+                bel_types[type] = std::tuple<int, int>(num_bel_types++, 1);
+            } else {
+                std::get<1>(bel_types.at(type))++;
+            }
+        }
+        for (auto bel : ctx->getBels()) {
+            if (!ctx->checkBelAvail(bel))
+                continue;
+            Loc loc = ctx->getBelLocation(bel);
+            IdString type = ctx->getBelType(bel);
+            int type_idx = std::get<0>(bel_types.at(type));
+            if (int(fast_bels.size()) < type_idx + 1)
+                fast_bels.resize(type_idx + 1);
+            if (int(fast_bels.at(type_idx).size()) < (loc.x + 1))
+                fast_bels.at(type_idx).resize(loc.x + 1);
+            if (int(fast_bels.at(type_idx).at(loc.x).size()) < (loc.y + 1))
+                fast_bels.at(type_idx).at(loc.x).resize(loc.y + 1);
+            max_x = std::max(max_x, loc.x);
+            max_y = std::max(max_y, loc.y);
+            fast_bels.at(type_idx).at(loc.x).at(loc.y).push_back(bel);
+        }
+
+        nearest_row_with_bel.resize(num_bel_types, std::vector<int>(max_y + 1, -1));
+        nearest_col_with_bel.resize(num_bel_types, std::vector<int>(max_x + 1, -1));
+        for (auto bel : ctx->getBels()) {
+            if (!ctx->checkBelAvail(bel))
+                continue;
+            Loc loc = ctx->getBelLocation(bel);
+            int type_idx = std::get<0>(bel_types.at(ctx->getBelType(bel)));
+            auto &nr = nearest_row_with_bel.at(type_idx), &nc = nearest_col_with_bel.at(type_idx);
+
+            for (int x = loc.x; x <= max_x; x++) {
+                if (nc.at(x) != -1 && std::abs(loc.x - nc.at(x)) <= (x - loc.x))
+                    break;
+                nc.at(x) = loc.x;
+            }
+            for (int x = loc.x - 1; x >= 0; x--) {
+                if (nc.at(x) != -1 && std::abs(loc.x - nc.at(x)) <= (loc.x - x))
+                    break;
+                nc.at(x) = loc.x;
+            }
+            for (int y = loc.y; y <= max_y; y++) {
+                if (nr.at(y) != -1 && std::abs(loc.y - nr.at(y)) <= (y - loc.y))
+                    break;
+                nr.at(y) = loc.y;
+            }
+            for (int y = loc.y - 1; y >= 0; y--) {
+                if (nr.at(y) != -1 && std::abs(loc.y - nr.at(y)) <= (loc.y - y))
+                    break;
+                nr.at(y) = loc.y;
+            }
+        }
+
+        // bounding box for region constraints
+        for (auto &region : sorted(ctx->region)) {
+            Region *r = region.second;
+            BoundingBox bb;
+            if (r->constr_bels) {
+                bb.x0 = std::numeric_limits<int>::max();
+                bb.x1 = std::numeric_limits<int>::min();
+                bb.y0 = std::numeric_limits<int>::max();
+                bb.y1 = std::numeric_limits<int>::min();
+                for (auto bel : r->bels) {
+                    Loc loc = ctx->getBelLocation(bel);
+                    bb.x0 = std::min(bb.x0, loc.x);
+                    bb.x1 = std::max(bb.x1, loc.x);
+                    bb.y0 = std::min(bb.y0, loc.y);
+                    bb.y1 = std::max(bb.y1, loc.y);
+                }
+            } else {
+                bb.x0 = 0;
+                bb.y0 = 0;
+                bb.x1 = max_x;
+                bb.y1 = max_y;
+            }
+            constraint_region_bounds[r->name] = bb;
+        }
+    }
+
+    // 初始化star算法信息
+    void setupStar()
     {
         for (auto net : sorted(ctx->nets)) {
             NetInfo *ni = net.second;
@@ -659,12 +683,6 @@ class ForcePlacer
             net_star_infos[ni->name] = NetStar();
             net_star_infos[ni->name].net_len = int(ni->users.size());
             net_star_infos[ni->name].net_len += ni->driver.cell == nullptr ? 0 : 1;
-            if (ignoreNet(ni)) // 不需要关心的net
-                continue;
-            net_bounds[ni->udata] = getNetBounds(ni);
-            if (cfg.timing_driven && int(ni->users.size()) < cfg.timingFanoutThresh)
-                for (size_t i = 0; i < ni->users.size(); i++)
-                    net_arc_tcost[ni->udata][i] = getTimingCost(ni, i);
         }
     }
 
@@ -774,6 +792,7 @@ class ForcePlacer
         return cost;
     }
 
+#if 0
     // 计算延迟开销
     double totalTimingCost()
     {
@@ -785,6 +804,7 @@ class ForcePlacer
         }
         return cost;
     }
+#endif
 
 #if 1
     // 更新链接的子节点
@@ -817,6 +837,25 @@ class ForcePlacer
             if (!cell->constr_children.empty())
                 updateChain(cell, cell);
         }
+    }
+
+    // 搜集所有需要布局的模块信息
+    int setupSolveCells()
+    {
+        int row = 0;
+        solve_cells.clear();
+        // 清除所有cell的udata
+        for (auto cell : sorted(ctx->cells))
+            cell.second->udata = dont_solve;
+        // 更新需要布局cell的udata
+        for (auto cell : place_cells) {
+            cell->udata = row++;
+            solve_cells.push_back(cell);
+        }
+        // 最后更新子节点
+        for (auto chained : chain_root)
+            ctx->cells.at(chained.first)->udata = chained.second->udata;
+        return row;
     }
 #endif
 
@@ -906,17 +945,13 @@ class ForcePlacer
     float crit_exp = 8.0f;
     wirelen_t curr_wirelen_cost, last_wirelen_cost;
     double last_timing_cost, curr_timing_cost;
-    float legalise_time = 0.0f;
+    float legalise_time = 0.0f, solve_time = 0, sl_time = 0;
 
-    int diameter = 35, max_x = 1, max_y = 1; // diameter 控制交换空间范围，不确定是否有必要保留
-    // 部分网络限制其边界框大小，从而跳过移动到边界框外的无效步骤
-    std::vector<BoundingBox> net_bounds;
+    int max_x = 1, max_y = 1;
     std::unordered_map<IdString, NetStar> net_star_infos;
-    // 部分线网的时钟惩罚（criticality * delay ns）
-    std::vector<std::vector<double>> net_arc_tcost;
 
     std::unordered_map<IdString, std::tuple<int, int>> bel_types;
-    std::unordered_map<IdString, BoundingBox> region_bounds;
+    std::unordered_map<IdString, BoundingBox> constraint_region_bounds;
 
     // 记录节点的位置
     std::unordered_map<IdString, CellLocation> cell_locs;
@@ -926,17 +961,16 @@ class ForcePlacer
     std::unordered_map<IdString, int> chain_size;
     // 真正会尝试布局的CELL对象，只包含非lock的宏块
     std::vector<CellInfo *> place_cells;
+    std::vector<CellInfo *> solve_cells;
 
-    std::unordered_map<const PortInfo *, size_t>
-            fast_port_to_user; // 给定port的信息快速查找这个port在net中连接点下标，从而根据net中usr数组访问对应的port
     std::vector<std::vector<std::vector<std::vector<BelId>>>> fast_bels;
-    std::unordered_set<BelId> locked_bels;
-
-    std::vector<decltype(NetInfo::udata)> old_udata;
-    std::vector<NetInfo *> net_by_udata;
+    std::vector<std::vector<int>> nearest_row_with_bel;
+    std::vector<std::vector<int>> nearest_col_with_bel;
 
     // Criticality data from timing analysis
     NetCriticalityMap net_crit;
+
+    decltype(CellInfo::udata) dont_solve = std::numeric_limits<decltype(CellInfo::udata)>::max();
 };
 
 PlacerFCfg::PlacerFCfg(Context *ctx)
