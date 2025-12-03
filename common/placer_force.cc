@@ -71,6 +71,7 @@ class ForcePlacer
         double xc, yc;                     // 线网的平均中心，xc = sum(x_i) / len(net) ，其中x_i为所有相连port的位置
         double x_divergence, y_divergence; // Divergence = \sqrt{sum((x_i - xc)^2) + 1} ，参考star+算法的S变量
         int net_len;                       // net中链接的Cell数量
+        double x_weight, y_weight;         // 权重
     };
 
   public:
@@ -161,7 +162,7 @@ class ForcePlacer
         // =========================================================================================================
         // placer正式算法开始
         place_start_time_anchor_point = std::chrono::high_resolution_clock::now();
-        if (!cfg.budgetBased)
+        if (cfg.timeDriven)
             get_criticalities(ctx, &net_crit);
 
         // 初始化代价查找表
@@ -172,9 +173,6 @@ class ForcePlacer
         log_info("random placement wirelen = %ld.\n", curr_wirelen_cost);
         last_wirelen_cost = curr_wirelen_cost;
         last_timing_cost = curr_timing_cost;
-
-        // if (cfg.netShareWeight > 0)
-        //     setupNetsByTile()
 
         wirelen_t solve_wirelen = curr_wirelen_cost;
         wirelen_t spread_wirelen = curr_wirelen_cost;
@@ -190,7 +188,8 @@ class ForcePlacer
             updateAllNetStar();
             solveAllCellPosition();
             auto solve_time_end_anchor_point = std::chrono::high_resolution_clock::now();
-            solve_time += std::chrono::duration<float>(solve_time_end_anchor_point - solve_time_start_anchor_point).count();
+            solve_time +=
+                    std::chrono::duration<float>(solve_time_end_anchor_point - solve_time_start_anchor_point).count();
             updateAllChain();
             solve_wirelen = totalWirelenCost();
             updateAllChain();
@@ -876,18 +875,32 @@ class ForcePlacer
             x_sum = double(cloc.x);
             y_sum = double(cloc.y);
         }
-        for (const auto &cell : net->users) {
-            CellInfo *ci = cell.cell;
+        BoundingBox bb = getNetBounds(net);
+        ns.x_weight = 1 / (ns.net_len * (std::max<double>(1.0, cfg.hpwl_scale_x * std::abs(bb.x1 - bb.x0))));
+        ns.y_weight = 1 / (ns.net_len * (std::max<double>(1.0, cfg.hpwl_scale_y * std::abs(bb.y1 - bb.y0))));
+        for (size_t i = 0; i < net->users.size(); i++) {
+            CellInfo *ci = net->users.at(i).cell;
             CellLocation cloc = cell_locs[ci->name];
             square_x_sum += double(cloc.x * cloc.x);
             square_y_sum += double(cloc.y * cloc.y);
             x_sum += double(cloc.x);
             y_sum += double(cloc.y);
+            if (net_crit.find(net->name) != net_crit.end()) {
+                auto nc = net_crit.at(net->name).criticality;
+                if (i < nc.size()) {
+                    // nc内部是一些小于1大于0的浮点数
+                    double update_weight = 1.0 + cfg.timingWeight * std::pow(nc.at(i), cfg.criticalityExponent);
+                    ns.x_weight *= update_weight;
+                    ns.y_weight *= update_weight;
+                }
+            }
         }
         NPNR_ASSERT(cfg.phi > 0);
         NPNR_ASSERT(cfg.gamma > 0);
-        ns.x_divergence = std::sqrt(square_x_sum - x_sum * x_sum / double(ns.net_len) + cfg.phi) * cfg.gamma;
-        ns.y_divergence = std::sqrt(square_y_sum - y_sum * y_sum / double(ns.net_len) + cfg.phi) * cfg.gamma;
+        ns.x_divergence =
+                std::sqrt(square_x_sum - x_sum * x_sum / double(ns.net_len) + cfg.phi) * cfg.gamma * ns.x_weight;
+        ns.y_divergence =
+                std::sqrt(square_y_sum - y_sum * y_sum / double(ns.net_len) + cfg.phi) * cfg.gamma * ns.y_weight;
         ns.xc = x_sum / double(ns.net_len);
         ns.yc = y_sum / double(ns.net_len);
     }
@@ -933,7 +946,7 @@ class ForcePlacer
     void solveAllCellPosition()
     {
         for (auto cell : place_cells) {
-            if (cell_locs.at(cell->name).global)
+            if (cell_locs.at(cell->name).global || cell_locs.at(cell->name).locked)
                 continue;
             solveCellPosition(cell);
         }
@@ -975,9 +988,15 @@ class ForcePlacer
 
 PlacerFCfg::PlacerFCfg(Context *ctx)
 {
-    minBelsForGridPick = ctx->setting<int>("placerforce/minBelsForGridPick", 64);
     hpwl_scale_x = 1;
     hpwl_scale_y = 1;
+    spread_scale_x = 1;
+    spread_scale_y = 1;
+    phi = 1;
+    gamma = 1;
+    criticalityExponent = ctx->setting<int>("placerForce/criticalityExponent", 2);
+    timingWeight = ctx->setting<int>("placerForce/timingWeight", 10);
+    timeDriven = true;
 }
 
 bool placer_force(Context *ctx, PlacerFCfg cfg)

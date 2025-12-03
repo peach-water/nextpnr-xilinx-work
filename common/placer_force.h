@@ -11,13 +11,12 @@ NEXTPNR_NAMESPACE_BEGIN
 struct PlacerFCfg {
     PlacerFCfg(Context *ctx);
     float constraintWeight, netShareWeight;
-    int minBelsForGridPick;
-    bool budgetBased;
-    float startTemp;
-    int timingFanoutThresh;
-    bool timing_driven;
+    bool timeDriven;
     int slack_redist_iter;
     int hpwl_scale_x, hpwl_scale_y;
+    int spread_scale_x, spread_scale_y;
+    int criticalityExponent;
+    float timingWeight;
 
     std::unordered_set<IdString> ioBufTypes;
     double phi, gamma; // star算法计算S的参数

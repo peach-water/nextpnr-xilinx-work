@@ -681,6 +681,7 @@ bool Arch::place()
             return false;
     } else if (placer == "force") {
         PlacerFCfg cfg(getCtx());
+        cfg.criticalityExponent = 2;
         cfg.ioBufTypes.insert(id("IOB_IBUFCTRL"));
         cfg.ioBufTypes.insert(id("IOB_OUTBUF"));
         cfg.ioBufTypes.insert(id_PSEUDO_GND);
