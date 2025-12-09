@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <map>
+#include <numeric>
 #include <queue>
 #include <string>
 #include <vector>
@@ -138,7 +139,7 @@ class ForcePlacer
         auto place_start_time_anchor_point = std::chrono::high_resolution_clock::now(); // 开始计时锚点
 
         // 暂时不确定用途，应该是计算时序约束
-        if (cfg.budgetBased && cfg.slack_redist_iter > 0)
+        if (cfg.timeDriven && cfg.slack_redist_iter > 0)
             assign_budget(ctx);
 
         ctx->yield();
@@ -171,15 +172,18 @@ class ForcePlacer
         curr_wirelen_cost = totalWirelenCost();
 
         log_info("random placement wirelen = %ld.\n", curr_wirelen_cost);
-        last_wirelen_cost = curr_wirelen_cost;
         last_timing_cost = curr_timing_cost;
+        best_wirelen_cost = curr_wirelen_cost;
 
         wirelen_t solve_wirelen = curr_wirelen_cost;
         wirelen_t spread_wirelen = curr_wirelen_cost;
         wirelen_t legal_wirelen = curr_wirelen_cost;
 
+        std::unordered_set<IdString> all_celltype;
+        for (auto cell : place_cells)
+            all_celltype.insert(cell->type);
+
         int n_no_progress = 0;
-        bool improved = false;
         // 算法主循环逻辑
         log_info("Runing Force placer.\n");
         setupSolveCells();
@@ -192,21 +196,35 @@ class ForcePlacer
                     std::chrono::duration<float>(solve_time_end_anchor_point - solve_time_start_anchor_point).count();
             updateAllChain();
             solve_wirelen = totalWirelenCost();
+
+            // for (const auto &group : cfg.cellGroups)
+            //     CutSpreader(this, group).run();
+            // for (auto type : sorted(all_celltype)) {
+            //     if (std::all_of(cfg.cellGroups.begin(), cfg.cellGroups.end(),
+            //                     [type](const std::unordered_set<IdString> &grp) { return !grp.count(type); }))
+            //         CutSpreader(this, {type}).run();
+            // }
             updateAllChain();
-            // 假设进行了扩散
             spread_wirelen = totalWirelenCost();
 
             // 合法化
             legalisePlacementStrict(true);
             updateAllChain();
-            legal_wirelen = totalWirelenCost();
+            if (cfg.timeDriven)
+                get_criticalities(ctx, &net_crit);
 
+            legal_wirelen = totalWirelenCost();
             curr_wirelen_cost = legal_wirelen;
             log_info("  at iter #%3d: solve wirelength: %ld, spread wirelength: %ld, legal wirelength: %ld.\n", iter,
                      solve_wirelen, spread_wirelen, legal_wirelen);
-            improved = curr_wirelen_cost < last_wirelen_cost;
-            last_wirelen_cost = curr_wirelen_cost;
-            if (!improved)
+            if (curr_wirelen_cost < best_wirelen_cost) {
+                best_wirelen_cost = curr_wirelen_cost;
+                n_no_progress = 0;
+                // FIXME 保存当前最优解
+            } else {
+                ++n_no_progress;
+            }
+            if (n_no_progress >= 5)
                 break;
             ctx->yield();
         }
@@ -218,7 +236,7 @@ class ForcePlacer
                  std::chrono::duration<float>(place_end_time_anchor_point - place_start_time_anchor_point).count());
         log_info("  of legalisation: %.2fs\n", legalise_time);
         log_info("  of solve: %.2fs.\n", solve_time);
-        log_info("  of spreading cells: %.2fs.\n", sl_time);
+        log_info("  of spreading cells: %.2fs.\n", spread_time);
 
         curr_wirelen_cost = totalWirelenCost();
         log_break();
@@ -693,7 +711,7 @@ class ForcePlacer
             return 0;
         if (ctx->getPortTimingClass(net->driver.cell, net->driver.port, cc) == TMG_IGNORE)
             return 0;
-        if (cfg.budgetBased) {
+        if (cfg.timeDriven) {
             double delay = ctx->getDelayNS(ctx->predictDelay(net, net->users.at(user)));
             return std::min(10.0, std::exp(delay - ctx->getDelayNS(net->users.at(user).budget) / 10));
         }
@@ -956,9 +974,9 @@ class ForcePlacer
     Context *ctx;
     PlacerFCfg cfg;
     float crit_exp = 8.0f;
-    wirelen_t curr_wirelen_cost, last_wirelen_cost;
+    wirelen_t curr_wirelen_cost, best_wirelen_cost;
     double last_timing_cost, curr_timing_cost;
-    float legalise_time = 0.0f, solve_time = 0, sl_time = 0;
+    float legalise_time = 0.0f, solve_time = 0, spread_time = 0;
 
     int max_x = 1, max_y = 1;
     std::unordered_map<IdString, NetStar> net_star_infos;
@@ -984,6 +1002,637 @@ class ForcePlacer
     NetCriticalityMap net_crit;
 
     decltype(CellInfo::udata) dont_solve = std::numeric_limits<decltype(CellInfo::udata)>::max();
+
+    // 二分元件扩散流程
+    template <typename T> T limit_to_reg(Region *reg, T val, bool dir)
+    {
+        if (reg == nullptr)
+            return val;
+        int limit_low = dir ? constraint_region_bounds[reg->name].y0 : constraint_region_bounds[reg->name].x0;
+        int limit_high = dir ? constraint_region_bounds[reg->name].y1 : constraint_region_bounds[reg->name].x1;
+        return std::max<T>(std::min<T>(val, limit_high), limit_low);
+    }
+
+    struct ChainExtent
+    {
+        int x0, x1, y0, y1;
+    };
+
+    struct SpreaderRegion
+    {
+        int id;
+        int x0, x1, y0, y1;
+        std::vector<int> cells, bels;
+        bool overused(float beta) const
+        {
+            for (size_t t = 0; t < cells.size(); t++) {
+                if (bels.at(t) < 4) {
+                    if (cells.at(t) > bels.at(t))
+                        return true;
+                } else {
+                    if (cells.at(t) > beta * bels.at(t))
+                        return true;
+                }
+            }
+            return false;
+        }
+    };
+
+    class CutSpreader
+    {
+      public:
+        CutSpreader(ForcePlacer *p, const std::unordered_set<IdString> &beltype) : p(p), ctx(p->ctx), beltype(beltype)
+        {
+            int idx = 0;
+            for (IdString type : sorted(beltype)) {
+                type_index[type] = idx;
+                fb.emplace_back(p->bel_types.count(type) ? &(p->fast_bels.at(std::get<0>(p->bel_types.at(type))))
+                                                         : nullptr);
+                idx++;
+            }
+        }
+        static int seq;
+        void run()
+        {
+            auto spread_start_time_anchor = std::chrono::high_resolution_clock::now();
+            init();
+            findOverusedRegions();
+            for (auto &r : regions) {
+                if (merged_regions.count(r.id))
+                    continue;
+            }
+            expandRegions();
+            std::queue<std::pair<int, bool>> workqueue;
+
+            for (auto &r : regions) {
+                if (merged_regions.count(r.id))
+                    continue;
+                workqueue.emplace(r.id, false);
+            }
+            while (!workqueue.empty()) {
+                auto front = workqueue.front();
+                workqueue.pop();
+                auto &r = regions.at(front.first);
+                if (std::all_of(r.cells.begin(), r.cells.end(), [](int x) { return x == 0; }))
+                    continue;
+                auto res = cutRegion(r, front.second);
+                if (res) {
+                    workqueue.emplace(res->first, !front.second);
+                    workqueue.emplace(res->second, !front.second);
+                } else {
+                    // try the other dir ,in case stuck in one direction only
+                    auto res2 = cutRegion(r, !front.second);
+                    if (res2) {
+                        workqueue.emplace(res2->first, front.second);
+                        workqueue.emplace(res2->second, front.second);
+                    }
+                }
+            }
+            auto spread_end_time_anchor = std::chrono::high_resolution_clock::now();
+            p->spread_time += std::chrono::duration<float>(spread_end_time_anchor - spread_start_time_anchor).count();
+        }
+
+      private:
+        ForcePlacer *p;
+        Context *ctx;
+        std::unordered_set<IdString> beltype;
+        std::unordered_map<IdString, int> type_index;
+        std::vector<std::vector<std::vector<int>>> occupancy;
+        std::vector<std::vector<int>> groups;
+        std::vector<std::vector<ChainExtent>> chaines;
+        std::map<IdString, ChainExtent> cell_extents;
+
+        std::vector<std::vector<std::vector<std::vector<BelId>>> *> fb;
+
+        std::vector<SpreaderRegion> regions;
+        std::unordered_set<int> merged_regions;
+        // cells at a location. sorted by real (not integer) x and y
+        std::vector<std::vector<std::vector<CellInfo *>>> cells_at_location;
+
+        int occ_at(int x, int y, int type) { return occupancy.at(x).at(y).at(type); }
+        int bels_at(int x, int y, int type)
+        {
+            if (fb.at(type) == nullptr || x >= int(fb.at(type)->size()) || y >= int(fb.at(type)->at(x).size()))
+                return 0;
+            return int(fb.at(type)->at(x).at(y).size());
+        }
+
+        void init()
+        {
+            occupancy.resize(p->max_x + 1,
+                             std::vector<std::vector<int>>(p->max_y + 1, std::vector<int>(beltype.size(), 0)));
+            groups.resize(p->max_x + 1, std::vector<int>(p->max_y + 1, -1));
+            chaines.resize(p->max_x + 1, std::vector<ChainExtent>(p->max_y + 1));
+            cells_at_location.resize(p->max_x + 1, std::vector<std::vector<CellInfo *>>(p->max_y + 1));
+            for (int x = 0; x <= p->max_x; x++) {
+                for (int y = 0; y <= p->max_y; y++) {
+                    for (int t = 0; t < int(beltype.size()); t++) {
+                        occupancy.at(x).at(y).at(t) = 0;
+                    }
+                    groups.at(x).at(y) = -1;
+                    chaines.at(x).at(y) = {x, y, x, y};
+                }
+            }
+            auto set_chain_ext = [&](IdString cell, int x, int y) {
+                if (!cell_extents.count(cell))
+                    cell_extents[cell] = {x, y, x, y};
+                else {
+                    cell_extents[cell].x0 = std::min(cell_extents[cell].x0, x);
+                    cell_extents[cell].x1 = std::max(cell_extents[cell].x1, x);
+                    cell_extents[cell].y0 = std::min(cell_extents[cell].y0, y);
+                    cell_extents[cell].y1 = std::max(cell_extents[cell].y1, y);
+                }
+            };
+
+            for (auto &cell : p->cell_locs) {
+                if (!beltype.count(ctx->cells.at(cell.first)->type))
+                    continue;
+                if (ctx->cells.at(cell.first)->belStrength > STRENGTH_STRONG)
+                    continue;
+                occupancy.at(cell.second.x).at(cell.second.y).at(type_index.at(ctx->cells.at(cell.first)->type))++;
+                if (p->chain_root.count(cell.first))
+                    set_chain_ext(p->chain_root.at(cell.first)->name, cell.second.x, cell.second.y);
+                else if (!ctx->cells.at(cell.first)->constr_children.empty())
+                    set_chain_ext(cell.first, cell.second.x, cell.second.y);
+            }
+
+            for (auto &cell : p->cell_locs) {
+                if (!beltype.count(ctx->cells.at(cell.first)->type))
+                    continue;
+                ChainExtent *ce = nullptr;
+                if (p->chain_root.count(cell.first))
+                    ce = &(cell_extents.at(p->chain_root.at(cell.first)->name));
+                else if (!ctx->cells.at(cell.first)->constr_children.empty())
+                    ce = &(cell_extents.at(cell.first));
+                if (ce) {
+                    auto &lce = chaines.at(cell.second.x).at(cell.second.y);
+                    lce.x0 = std::min(lce.x0, ce->x0);
+                    lce.y0 = std::min(lce.y0, ce->y0);
+                    lce.x1 = std::max(lce.x1, ce->x1);
+                    lce.y1 = std::max(lce.y1, ce->y1);
+                }
+            }
+            for (auto cell : p->solve_cells) {
+                if (!beltype.count(cell->type))
+                    continue;
+                cells_at_location.at(p->cell_locs.at(cell->name).x).at(p->cell_locs.at(cell->name).y).push_back(cell);
+            }
+        }
+
+        void mergeRegions(SpreaderRegion &merged, SpreaderRegion &mergee)
+        {
+            for (int x = mergee.x0; x <= mergee.x1; x++) {
+                for (int y = mergee.y0; y <= mergee.y1; y++) {
+                    NPNR_ASSERT(groups.at(x).at(y) == mergee.id);
+                    groups.at(x).at(y) = merged.id;
+                    for (size_t t = 0; t < beltype.size(); t++) {
+                        merged.cells.at(t) += occ_at(x, y, t);
+                        merged.bels.at(t) += bels_at(x, y, t);
+                    }
+                }
+            }
+            merged_regions.insert(mergee.id);
+            growRegion(merged, mergee.x0, mergee.y0, mergee.x1, mergee.y1);
+        }
+
+        void growRegion(SpreaderRegion &r, int x0, int y0, int x1, int y1, bool init = false)
+        {
+            // log_info("growing to (%d, %d) |_> (%d, %d).\n", x0, y0, x1, y1);
+            if ((x0 >= r.x0 && y0 >= r.y0 && x1 <= r.x1 && y1 <= r.y1) || init)
+                return;
+            if (x0 < 0 || x1 > p->max_x || y0 < 0 || y1 > p->max_y)
+                return;
+            int old_x0 = r.x0 + (init ? 1 : 0), old_y0 = r.y0, old_x1 = r.x1, old_y1 = r.y1;
+            r.x0 = std::min(r.x0, x0);
+            r.y0 = std::min(r.y0, y0);
+            r.x1 = std::max(r.x1, x1);
+            r.y1 = std::max(r.y1, y1);
+
+            auto process_location = [&](int x, int y) {
+                // merge any overlapping regions
+                if (groups.at(x).at(y) == -1) {
+                    for (int t = 0; t < int(beltype.size()); t++) {
+                        r.bels.at(t) += bels_at(x, y, t);
+                        r.cells.at(t) += occ_at(x, y, t);
+                    }
+                }
+                if (groups.at(x).at(y) != -1 && groups.at(x).at(y) != r.id)
+                    mergeRegions(r, regions.at(groups.at(x).at(y)));
+                groups.at(x).at(y) = r.id;
+                auto &chaine = chaines.at(x).at(y);
+                growRegion(r, chaine.x0, chaine.y0, chaine.x1, chaine.y1);
+            };
+            for (int x = r.x0; x < old_x0; x++)
+                for (int y = r.y0; y <= r.y1; y++)
+                    process_location(x, y);
+            for (int x = old_x1 + 1; x <= x1; x++)
+                for (int y = r.y0; y <= r.y1; y++)
+                    process_location(x, y);
+            for (int y = r.y0; y < old_y0; y++)
+                for (int x = r.x0; x <= r.x1; x++)
+                    process_location(x, y);
+            for (int y = old_y1 + 1; y <= r.y1; y++)
+                for (int x = r.x0; x <= r.x1; x++)
+                    process_location(x, y);
+        }
+
+        void findOverusedRegions()
+        {
+            for (int x = 0; x <= p->max_x; x++) {
+                for (int y = 0; y <= p->max_y; y++) {
+                    if (groups.at(x).at(y) != -1)
+                        continue;
+                    bool overutilised = false;
+                    for (size_t t = 0; t < beltype.size(); t++) {
+                        if (occ_at(x, y, t) > bels_at(x, y, t)) {
+                            overutilised = true;
+                            break;
+                        }
+                    }
+                    if (!overutilised)
+                        continue;
+
+                    int id = int(regions.size());
+                    groups.at(x).at(y) = id;
+                    SpreaderRegion reg;
+                    reg.id = id;
+                    reg.x0 = reg.x1 = x;
+                    reg.y0 = reg.y1 = y;
+                    for (size_t t = 0; t < beltype.size(); t++) {
+                        reg.bels.push_back(bels_at(x, y, t));
+                        reg.cells.push_back(occ_at(x, y, t));
+                    }
+                    // make sure we cover carries, etc
+                    growRegion(reg, reg.x0, reg.y0, reg.x1, reg.y1, true);
+
+                    bool expanded = true;
+                    while (expanded) {
+                        expanded = false;
+                        // keep trying expansion in x and y, until we find no over-occupancy cells
+                        // or hit grouped cells
+
+                        // first trying expanding in x
+                        if (reg.x1 < p->max_x) {
+                            bool over_occ_x = false;
+                            for (int y1 = reg.y0; y1 <= reg.y1; y1++) {
+                                for (size_t t = 0; t < beltype.size(); t++) {
+                                    if (occ_at(reg.x1 + 1, y1, t) > bels_at(reg.x1 + 1, y1, t)) {
+                                        over_occ_x = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (over_occ_x) {
+                                expanded = true;
+                                growRegion(reg, reg.x0, reg.y0, reg.x1 + 1, reg.y1);
+                            }
+                        }
+
+                        if (reg.y1 < p->max_y) {
+                            bool over_occ_y = false;
+                            for (int x1 = reg.x0; x1 <= reg.x1; x1++) {
+                                for (size_t t = 0; t < beltype.size(); t++) {
+                                    if (occ_at(x1, reg.y1 + 1, t) > bels_at(x1, reg.y1 + 1, t)) {
+                                        over_occ_y = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (over_occ_y) {
+                                expanded = true;
+                                growRegion(reg, reg.x0, reg.y0, reg.x1, reg.y1 + 1);
+                            }
+                        }
+                    }
+                    regions.push_back(reg);
+                }
+            }
+        }
+
+        void expandRegions()
+        {
+            std::queue<int> overu_regions;
+            float beta = p->cfg.beta;
+            for (auto &r : regions) {
+                if (!merged_regions.count(r.id) && r.overused(beta))
+                    overu_regions.push(r.id);
+            }
+            while (!overu_regions.empty()) {
+                int rid = overu_regions.front();
+                overu_regions.pop();
+                if (merged_regions.count(rid))
+                    continue;
+                auto &reg = regions.at(rid);
+                while (reg.overused(beta)) {
+                    bool changed = false;
+                    for (int j = 0; j < p->cfg.spread_scale_x; j++) {
+                        if (reg.x0 > 0) {
+                            growRegion(reg, reg.x0 - 1, reg.y0, reg.x1, reg.y1);
+                            changed = true;
+                            if (!reg.overused(beta))
+                                break;
+                        }
+                        if (reg.x1 < p->max_x) {
+                            growRegion(reg, reg.x0, reg.y0, reg.x1 + 1, reg.y1);
+                            changed = true;
+                            if (!reg.overused(beta))
+                                break;
+                        }
+                    }
+                    for (int j = 0; j < p->cfg.spread_scale_y; j++) {
+                        if (reg.y0 > 0) {
+                            growRegion(reg, reg.x0, reg.y0 - 1, reg.x1, reg.y1);
+                            changed = true;
+                            if (!reg.overused(beta))
+                                break;
+                        }
+                        if (reg.y1 < p->max_y) {
+                            growRegion(reg, reg.x0, reg.y0, reg.x1, reg.y1 + 1);
+                            changed = true;
+                            if (!reg.overused(beta))
+                                break;
+                        }
+                    }
+                    if (!changed) {
+                        for (auto bt : sorted(beltype)) {
+                            if (reg.cells > reg.bels)
+                                log_error("Failed to expand region (%d, %d) |_> (%d, %d) of %d %ss\n", reg.x0, reg.y0,
+                                          reg.x1, reg.y1, reg.cells.at(type_index.at(bt)), bt.c_str(ctx));
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+
+        std::vector<CellInfo *> cut_cells;
+        boost::optional<std::pair<int, int>> cutRegion(SpreaderRegion &r, bool dir)
+        {
+            cut_cells.clear();
+            auto &cal = cells_at_location;
+            int total_cells = 0, total_bels = 0;
+            for (int x = r.x0; x <= r.x1; x++) {
+                for (int y = r.y0; y <= r.y1; y++) {
+                    std::copy(cal.at(x).at(y).begin(), cal.at(x).at(y).end(), std::back_inserter(cut_cells));
+                    for (size_t t = 0; t < beltype.size(); t++)
+                        total_bels += bels_at(x, y, t);
+                }
+            }
+            for (auto &cell : cut_cells) {
+                total_cells += p->chain_size.count(cell->name) ? p->chain_size.at(cell->name) : 1;
+            }
+
+            std::sort(cut_cells.begin(), cut_cells.end(), [&](const CellInfo *a, const CellInfo *b) {
+                return dir ? (p->cell_locs.at(a->name).rawy < p->cell_locs.at(b->name).rawy)
+                           : (p->cell_locs.at(a->name).rawx < p->cell_locs.at(b->name).rawx);
+            });
+
+            if (cut_cells.size() < 2)
+                return {};
+            // find the cells midpoint, counting chains in terms of their total size - making the inital source cut
+            int pivot_cells = 0;
+            int pivot = 0;
+            for (auto &cell : cut_cells) {
+                pivot_cells += p->chain_size.count(cell->name) ? p->chain_size.at(cell->name) : 1;
+                if (pivot_cells >= total_cells / 2)
+                    break;
+                pivot++;
+            }
+            if (pivot >= int(cut_cells.size())) {
+                pivot = int(cut_cells.size()) - 1;
+            }
+
+            int clearance_l = 0, clearance_r = 0;
+            for (size_t i = 0; i < cut_cells.size(); i++) {
+                int size;
+                if (cell_extents.count(cut_cells.at(i)->name)) {
+                    auto &ce = cell_extents.at(cut_cells.at(i)->name);
+                    size = dir ? (ce.y1 - ce.y0 + 1) : (ce.x1 - ce.x0 + 1);
+                } else {
+                    size = 1;
+                }
+                if (int(i) < pivot) {
+                    clearance_l = std::max(clearance_l, size);
+                } else {
+                    clearance_r = std::max(clearance_r, size);
+                }
+            }
+            // find the target cut that minimises difference in utilisation, whilst trying to ensure that all chains
+            // still fit
+
+            // first trim the boundaries of the region in the axis-of-interest, skipping any rows/cols without any bels
+            // of the appropriate type
+            int trimmed_l = dir ? r.y0 : r.x0, trimmed_r = dir ? r.y1 : r.x1;
+            while (trimmed_l < (dir ? r.y1 : r.x1)) {
+                bool have_bels = false;
+                for (int i = (dir ? r.x0 : r.y0); i <= (dir ? r.x1 : r.y1) && !have_bels; i++) {
+                    for (size_t t = 0; t < beltype.size(); t++) {
+                        if (bels_at(dir ? i : trimmed_l, dir ? trimmed_l : i, t) > 0) {
+                            have_bels = true;
+                            break;
+                        }
+                    }
+                }
+                if (have_bels)
+                    break;
+                trimmed_l++;
+            }
+            while (trimmed_r > (dir ? r.y0 : r.x0)) {
+                bool have_bels = false;
+                for (int i = (dir ? r.x0 : r.y0); i <= (dir ? r.x1 : r.y1) && !have_bels; i++) {
+                    for (size_t t = 0; t < beltype.size(); t++) {
+                        if (bels_at(dir ? i : trimmed_r, dir ? trimmed_r : i, t) > 0) {
+                            have_bels = true;
+                            break;
+                        }
+                    }
+                }
+                if (have_bels)
+                    break;
+                trimmed_r--;
+            }
+
+            if ((trimmed_r - trimmed_l + 1) <= std::max(clearance_l, clearance_r))
+                return {};
+            // Now find the initial target cut that minimises utilisation imbalance, whilst
+            // meeting the clearance requirements for any large macros
+            std::vector<int> left_cells_v(beltype.size(), 0), right_cells_v(beltype.size(), 0);
+            std::vector<int> left_bels_v(beltype.size(), 0), right_bels_v(r.bels);
+            for (int i = 0; i <= pivot; i++)
+                left_cells_v.at(type_index.at(cut_cells.at(i)->type)) +=
+                        p->chain_size.count(cut_cells.at(i)->name) ? p->chain_size.at(cut_cells.at(i)->name) : 1;
+            for (int i = pivot + 1; i < int(cut_cells.size()); i++)
+                right_cells_v.at(type_index.at(cut_cells.at(i)->type)) +=
+                        p->chain_size.count(cut_cells.at(i)->name) ? p->chain_size.at(cut_cells.at(i)->name) : 1;
+
+            int best_tgt_cut = -1;
+            double best_detaU = std::numeric_limits<double>::max();
+
+            std::vector<int> silther_bels(beltype.size(), 0);
+            for (int i = trimmed_l; i <= trimmed_r; i++) {
+                for (size_t t = 0; t < beltype.size(); t++)
+                    silther_bels.at(t) = 0;
+                for (int j = (dir ? r.x0 : r.y0); j <= (dir ? r.x1 : r.y1); j++) {
+                    for (size_t t = 0; t < beltype.size(); t++) {
+                        silther_bels.at(t) += dir ? bels_at(j, i, t) : bels_at(i, j, t);
+                    }
+                }
+                for (size_t t = 0; t < beltype.size(); t++) {
+                    left_bels_v.at(t) += silther_bels.at(t);
+                    right_bels_v.at(t) -= silther_bels.at(t);
+                }
+
+                if (((i - trimmed_l) + 1) >= clearance_l && ((trimmed_r - i) + 1) >= clearance_r) {
+                    double aU = 0.0;
+                    for (size_t t = 0; t < beltype.size(); t++) {
+                        aU += (left_cells_v.at(t) + right_cells_v.at(t)) *
+                              std::abs(double(left_cells_v.at(t)) / double(std::max(left_bels_v.at(t), 1)) -
+                                       double(right_cells_v.at(t)) / double(std::max(right_cells_v.at(t), 1)));
+                    }
+                    if (aU < best_detaU) {
+                        best_detaU = aU;
+                        best_tgt_cut = i;
+                    }
+                }
+            }
+            if (best_tgt_cut == -1)
+                return {};
+
+            for (size_t t = 0; t < beltype.size(); t++) {
+                left_bels_v.at(t) = 0;
+                right_bels_v.at(t) = 0;
+            }
+            for (int x = r.x0; x <= (dir ? r.x1 : best_tgt_cut); x++) {
+                for (int y = r.y0; y <= (dir ? best_tgt_cut : r.y1); y++) {
+                    for (size_t t = 0; t < beltype.size(); t++) {
+                        left_bels_v.at(t) += bels_at(x, y, t);
+                    }
+                }
+            }
+            for (int x = (dir ? r.x0 : (best_tgt_cut + 1)); x <= r.x1; x++) {
+                for (int y = (dir ? (best_tgt_cut + 1) : r.y0); y <= r.y1; y++) {
+                    for (size_t t = 0; t < beltype.size(); t++) {
+                        right_bels_v.at(t) += bels_at(x, y, t);
+                    }
+                }
+            }
+            if (std::accumulate(left_bels_v.begin(), left_bels_v.end(), 0) == 0 ||
+                std::accumulate(right_bels_v.begin(), right_bels_v.end(), 0) == 0)
+                return {};
+
+            auto is_part_overutil = [&](bool r) {
+                double delta = 0;
+                for (size_t t = 0; t < left_cells_v.size(); t++) {
+                    delta = double(left_cells_v.at(t)) / double(std::max(left_bels_v.at(t), 1)) -
+                            double(right_cells_v.at(t)) / double(std::max(right_bels_v.at(t), 1));
+                }
+                return r ? delta < 0 : delta > 0;
+            };
+
+            while (pivot > 0 && is_part_overutil(false)) {
+                auto &move_cell = cut_cells.at(pivot);
+                int size = p->chain_size.count(move_cell->name) ? p->chain_size.at(move_cell->name) : 1;
+                left_cells_v.at(type_index.at(cut_cells.at(pivot)->type)) -= size;
+                right_cells_v.at(type_index.at(cut_cells.at(pivot)->type)) += size;
+                pivot--;
+            }
+            while (pivot < int(cut_cells.size()) - 1 && is_part_overutil(true)) {
+                auto &move_cell = cut_cells.at(pivot + 1);
+                int size = p->chain_size.count(move_cell->name) ? p->chain_size.at(move_cell->name) : 1;
+                left_cells_v.at(type_index.at(cut_cells.at(pivot)->type)) += size;
+                right_cells_v.at(type_index.at(cut_cells.at(pivot)->type)) -= size;
+                pivot++;
+            }
+
+            // split regions in bins, and then spread cells by linear interpolation within those bins
+            auto spread_binlerp = [&](int cells_start, int cells_end, double area_l, double area_r) {
+                int N = cells_end - cells_start;
+                if (N <= 2) {
+                    for (int i = cells_start; i < cells_end; i++) {
+                        auto &pos = dir ? p->cell_locs.at(cut_cells.at(i)->name).rawy
+                                        : p->cell_locs.at(cut_cells.at(i)->name).rawx;
+                        pos = area_l + i * ((area_r - area_l) / N);
+                    }
+                    return;
+                }
+                // split region into up to 10 (K) bins
+                int K = std::min<int>(N, 10);
+                std::vector<std::pair<int, double>> bin_bounds; // [(cell start, area start)]
+                bin_bounds.emplace_back(cells_start, area_l);
+                for (int i = 1; i < K; i++)
+                    bin_bounds.emplace_back(cells_start + (N * i) / K, area_l + ((area_r - area_l + 0.99) * i) / K);
+                bin_bounds.emplace_back(cells_end, area_r + 0.99);
+                for (int i = 0; i < K; i++) {
+                    auto &bl = bin_bounds.at(i), br = bin_bounds.at(i + 1);
+                    double orig_left = dir ? p->cell_locs.at(cut_cells.at(bl.first)->name).rawy
+                                           : p->cell_locs.at(cut_cells.at(bl.first)->name).rawx;
+                    double orig_right = dir ? p->cell_locs.at(cut_cells.at(br.first - 1)->name).rawy
+                                            : p->cell_locs.at(cut_cells.at(br.first - 1)->name).rawx;
+                    double m = (br.second - bl.second) / std::max(0.00001, orig_right - orig_left);
+                    for (int j = bl.first; j < br.first; j++) {
+                        Region *cr = cut_cells.at(j)->region;
+                        if (cr != nullptr) {
+                            // limit spreading bounds to constraint region; if applicable
+                            double brsc = p->limit_to_reg(cr, br.second, dir);
+                            double blsc = p->limit_to_reg(cr, bl.second, dir);
+                            double mr = (brsc - blsc) / std::max(0.00001, orig_right - orig_left);
+                            auto &pos = dir ? p->cell_locs.at(cut_cells.at(j)->name).rawy
+                                            : p->cell_locs.at(cut_cells.at(j)->name).rawx;
+                            NPNR_ASSERT(pos >= orig_left && pos <= orig_right);
+                            pos = blsc + mr * (pos - orig_left);
+                        } else {
+                            auto &pos = dir ? p->cell_locs.at(cut_cells.at(j)->name).rawy
+                                            : p->cell_locs.at(cut_cells.at(j)->name).rawx;
+                            NPNR_ASSERT(pos >= orig_left && pos <= orig_right);
+                            pos = bl.second + m * (pos - orig_left);
+                        }
+                    }
+                }
+            };
+            spread_binlerp(0, pivot + 1, trimmed_l, best_tgt_cut);
+            spread_binlerp(pivot + 1, int(cut_cells.size()), best_tgt_cut + 1, trimmed_r);
+            // update various data structures
+            for (int x = r.x0; x <= r.x1; x++) {
+                for (int y = r.y0; y <= r.y1; y++) {
+                    cells_at_location.at(x).at(y).clear();
+                }
+            }
+            for (auto cell : cut_cells) {
+                auto &cl = p->cell_locs.at(cell->name);
+                cl.x = std::min(r.x1, std::max(r.x0, int(cl.rawx)));
+                cl.y = std::min(r.y1, std::max(r.y0, int(cl.rawy)));
+                cells_at_location.at(cl.x).at(cl.y).push_back(cell);
+            }
+            SpreaderRegion rl, rr;
+            rl.id = int(regions.size());
+            rl.x0 = r.x0;
+            rl.y0 = r.y0;
+            rl.x1 = dir ? r.x1 : best_tgt_cut;
+            rl.y1 = dir ? best_tgt_cut : r.y1;
+            rl.cells = left_cells_v;
+            rl.bels = left_bels_v;
+            rr.id = int(regions.size()) + 1;
+            rr.x0 = dir ? r.x0 : (best_tgt_cut + 1);
+            rr.y0 = dir ? (best_tgt_cut + 1) : r.y0;
+            rr.x1 = r.x1;
+            rr.y1 = r.y1;
+            rr.cells = right_cells_v;
+            rr.bels = right_bels_v;
+            regions.push_back(rl);
+            regions.push_back(rr);
+            for (int x = rl.x0; x <= rl.x1; x++) {
+                for (int y = rl.y0; y <= rl.y1; y++) {
+                    groups.at(x).at(y) = rl.id;
+                }
+            }
+            for (int x = rr.x0; x <= rr.x1; x++) {
+                for (int y = rr.y0; y <= rr.y1; y++) {
+                    groups.at(x).at(y) = rr.id;
+                }
+            }
+            return std::make_pair(rl.id, rr.id);
+        }
+    };
 };
 
 PlacerFCfg::PlacerFCfg(Context *ctx)

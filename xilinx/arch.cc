@@ -686,10 +686,17 @@ bool Arch::place()
         cfg.ioBufTypes.insert(id("IOB_OUTBUF"));
         cfg.ioBufTypes.insert(id_PSEUDO_GND);
         cfg.ioBufTypes.insert(id_PSEUDO_VCC);
-        cfg.hpwl_scale_y = 1;
         cfg.hpwl_scale_x = 1;
+        cfg.hpwl_scale_y = 1;
+        cfg.spread_scale_x = 1;
+        cfg.spread_scale_y = 1;
+        cfg.cellGroups.emplace_back();
+        cfg.cellGroups.back().insert(id_SLICE_LUTX);
+        cfg.cellGroups.back().insert(id_SLICE_FFX);
+        cfg.cellGroups.back().insert(id_CARRY8);
         cfg.phi = 1.0;
         cfg.gamma = 1.0;
+        cfg.beta = 0.4;
         if (!placer_force(getCtx(), cfg))
             return false;
     } else {

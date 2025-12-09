@@ -19,7 +19,9 @@ struct PlacerFCfg {
     float timingWeight;
 
     std::unordered_set<IdString> ioBufTypes;
+    std::vector<std::unordered_set<IdString>> cellGroups;
     double phi, gamma; // star算法计算S的参数
+    float beta; // 扩散算法计算阈值
 };
 
 extern bool placer_force(Context *ctx, PlacerFCfg cfg);
