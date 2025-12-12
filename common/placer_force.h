@@ -8,7 +8,8 @@
 
 NEXTPNR_NAMESPACE_BEGIN
 
-struct PlacerFCfg {
+struct PlacerFCfg
+{
     PlacerFCfg(Context *ctx);
     float constraintWeight, netShareWeight;
     bool timeDriven;
@@ -21,7 +22,8 @@ struct PlacerFCfg {
     std::unordered_set<IdString> ioBufTypes;
     std::vector<std::unordered_set<IdString>> cellGroups;
     double phi, gamma; // star算法计算S的参数
-    float beta; // 扩散算法计算阈值
+    float beta;        // 扩散算法计算阈值
+    float alpha;       // 伪连接力权重，越大则伪连接力生效速度越快
 };
 
 extern bool placer_force(Context *ctx, PlacerFCfg cfg);

@@ -688,7 +688,7 @@ bool Arch::place()
         cfg.ioBufTypes.insert(id_PSEUDO_VCC);
         cfg.hpwl_scale_x = 1;
         cfg.hpwl_scale_y = 1;
-        cfg.spread_scale_x = 1;
+        cfg.spread_scale_x = 2;
         cfg.spread_scale_y = 1;
         cfg.cellGroups.emplace_back();
         cfg.cellGroups.back().insert(id_SLICE_LUTX);
@@ -697,6 +697,7 @@ bool Arch::place()
         cfg.phi = 1.0;
         cfg.gamma = 1.0;
         cfg.beta = 0.4;
+        cfg.alpha = 0.04;
         if (!placer_force(getCtx(), cfg))
             return false;
     } else {

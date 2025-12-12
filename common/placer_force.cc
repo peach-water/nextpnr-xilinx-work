@@ -46,23 +46,36 @@ class ForcePlacer
     // 在布局算法初期允许cell自由移动
     struct CellLocation
     {
-        int x, y;             // 当前位置
-        int legal_x, legal_y; // 合法化位置
-        double rawx, rawy;    // 力算法得到的原始位置
+        int x, y;                       // 当前位置
+        int legal_x, legal_y;           // 合法化位置
+        double rawx, rawy;              // 力算法得到的原始位置
+        int best_legal_x, best_legal_y; // 最优合法化位置
         bool locked = false, global = false;
 
-        CellLocation() {}
+        CellLocation()
+        {
+            x = y = 0;
+            rawx = rawy = 0;
+            legal_x = legal_y = 0;
+        }
         CellLocation(Loc loc)
         {
             x = loc.x;
             y = loc.y;
             rawx = double(x);
             rawy = double(y);
+            legal_x = 0;
+            legal_y = 0;
         }
         void legal()
         {
             legal_x = x;
             legal_y = y;
+        }
+        void bestLegal()
+        {
+            best_legal_x = legal_x;
+            best_legal_y = legal_y;
         }
     };
 
@@ -135,13 +148,23 @@ class ForcePlacer
 
         seedPlacement();
         updateAllChain();
-        log_info("Creating initial placement for remaining %d cells.\n", int(place_cells.size()));
+        setupStar();
+        log_info("Creating initial placement for remaining %d cells, random placement wirelen = %ld.\n",
+                 int(place_cells.size()), totalWirelenCost());
         auto place_start_time_anchor_point = std::chrono::high_resolution_clock::now(); // 开始计时锚点
 
         // 暂时不确定用途，应该是计算时序约束
         if (cfg.timeDriven && cfg.slack_redist_iter > 0)
             assign_budget(ctx);
-
+        setupSolveCells();
+#if 1
+        for (int i = 0; i < 3; i++) {
+            updateAllNetStar();
+            solveAllCellPosition();
+            updateAllChain();
+            log_info("  at initial placer iter #%3d, wirelen = %ld.\n", i, totalWirelenCost());
+        }
+#endif
         ctx->yield();
         auto place_end_time_anchor_point = std::chrono::high_resolution_clock::now(); // 结束计时锚点
         log_break();
@@ -166,14 +189,12 @@ class ForcePlacer
         if (cfg.timeDriven)
             get_criticalities(ctx, &net_crit);
 
-        // 初始化代价查找表
-        setupStar();
         // 计算线长开销与延迟开销
         curr_wirelen_cost = totalWirelenCost();
 
         log_info("random placement wirelen = %ld.\n", curr_wirelen_cost);
         last_timing_cost = curr_timing_cost;
-        best_wirelen_cost = curr_wirelen_cost;
+        best_wirelen_cost = std::numeric_limits<int64_t>::max();
 
         wirelen_t solve_wirelen = curr_wirelen_cost;
         wirelen_t spread_wirelen = curr_wirelen_cost;
@@ -186,15 +207,18 @@ class ForcePlacer
         int n_no_progress = 0;
         // 算法主循环逻辑
         log_info("Runing Force placer.\n");
-        setupSolveCells();
         for (int iter = 1;; iter++) {
             auto solve_time_start_anchor_point = std::chrono::high_resolution_clock::now();
-            updateAllNetStar();
-            solveAllCellPosition();
+            auto iter_time_start_anchor_point = solve_time_start_anchor_point;
+            for (int loop = 0; loop < 3; loop++) {
+                updateAllNetStar();             // TODO 扩散后不能及时收缩导致越扩散越开，考虑多次迭代后进行一次合法化
+                solveAllCellPosition(iter - 1); // 第一次运行时legal_x和legal_y处于未初始化状态，因此赋值0
+                updateAllChain();
+                log_info("    at iter-loop #%3d-@%2d, solve wirelength: %ld.\n", iter, loop, totalWirelenCost());
+            }
             auto solve_time_end_anchor_point = std::chrono::high_resolution_clock::now();
             solve_time +=
                     std::chrono::duration<float>(solve_time_end_anchor_point - solve_time_start_anchor_point).count();
-            updateAllChain();
             solve_wirelen = totalWirelenCost();
 
             // for (const auto &group : cfg.cellGroups)
@@ -210,23 +234,35 @@ class ForcePlacer
             // 合法化
             legalisePlacementStrict(true);
             updateAllChain();
+            for (auto &cell : cell_locs)
+                cell.second.legal();
             if (cfg.timeDriven)
                 get_criticalities(ctx, &net_crit);
 
             legal_wirelen = totalWirelenCost();
             curr_wirelen_cost = legal_wirelen;
-            log_info("  at iter #%3d: solve wirelength: %ld, spread wirelength: %ld, legal wirelength: %ld.\n", iter,
-                     solve_wirelen, spread_wirelen, legal_wirelen);
+            auto iter_time_end_archor_point = std::chrono::high_resolution_clock::now();
+            log_info("  at iter #%3d: solve wirelength: %ld, spread wirelength: %ld, legal wirelength: %ld, time = "
+                     "%.3fs.\n",
+                     iter, solve_wirelen, spread_wirelen, legal_wirelen,
+                     std::chrono::duration<float>(iter_time_end_archor_point - iter_time_start_anchor_point).count());
             if (curr_wirelen_cost < best_wirelen_cost) {
                 best_wirelen_cost = curr_wirelen_cost;
                 n_no_progress = 0;
-                // FIXME 保存当前最优解
+                // 保存当前最优解
+                for (auto &cell : cell_locs)
+                    cell.second.bestLegal();
             } else {
                 ++n_no_progress;
             }
             if (n_no_progress >= 5)
                 break;
             ctx->yield();
+        }
+        // 恢复最优解
+        for (auto &cell : cell_locs) {
+            cell.second.x = cell.second.best_legal_x;
+            cell.second.y = cell.second.best_legal_y;
         }
         legalisePlacementStrict(true);
 
@@ -293,7 +329,7 @@ class ForcePlacer
             }
         }
 
-        std::queue<std::pair<int, IdString>> remaining;
+        std::priority_queue<std::pair<int, IdString>> remaining;
         for (auto cell : solve_cells)
             remaining.emplace(chain_size[cell->name], cell->name);
 
@@ -302,9 +338,9 @@ class ForcePlacer
         int ripup_radius = 2; // 搜索范围
         int total_iters = 0;
         int total_iters_noreset = 0;
-        const int solve_problems = int(remaining.size()); // 要解决的问题大小
+
         while (!remaining.empty()) {
-            auto top = remaining.front();
+            auto top = remaining.top();
             remaining.pop();
 
             CellInfo *ci = ctx->cells.at(top.second).get();
@@ -314,7 +350,7 @@ class ForcePlacer
             if (debug_this)
                 log_info(" Legalising %s (%s).\n", ci->name.c_str(ctx), ci->type.c_str(ctx));
             int bt = std::get<0>(bel_types.at(ci->type));
-            auto &fb = fast_bels[bt];
+            auto &fb = fast_bels.at(bt);
             int radius = 0;
             int iter = 0;
             int iter_at_radius = 0;
@@ -327,10 +363,9 @@ class ForcePlacer
 
             total_iters++;
             total_iters_noreset++;
-
-            if (total_iters > solve_problems) {
+            if (total_iters > int(solve_cells.size())) {
                 total_iters = 0;
-                ripup_radius = std::max(std::max(max_x, max_y), ripup_radius << 1);
+                ripup_radius = std::max(std::max(max_x, max_y), ripup_radius * 2);
             }
 
             if (total_iters_noreset > std::max(5000, 8 * int(ctx->cells.size()))) {
@@ -357,8 +392,8 @@ class ForcePlacer
                 }
                 // 随机找到约束范围内的一个BEL
 
-                int nx = ctx->rng((rx << 1) + 1) + std::max(cloc.x - rx, 0);
-                int ny = ctx->rng((ry << 1) + 1) + std::max(cloc.y - ry, 0);
+                int nx = ctx->rng(2 * rx + 1) + std::max(cell_locs.at(ci->name).x - rx, 0);
+                int ny = ctx->rng(2 * ry + 1) + std::max(cell_locs.at(ci->name).y - ry, 0);
 
                 iter++;
                 iter_at_radius++;
@@ -445,7 +480,7 @@ class ForcePlacer
                                         continue;
                                     if (drv_loc->second.global)
                                         continue;
-                                    input_len = std::abs(drv_loc->second.x - nx) + std::abs(drv_loc->second.y - ny);
+                                    input_len += std::abs(drv_loc->second.x - nx) + std::abs(drv_loc->second.y - ny);
                                 }
                                 if (input_len < best_inp_len) {
                                     best_inp_len = input_len;
@@ -935,7 +970,7 @@ class ForcePlacer
     }
 
     // 求解单个cell的新位置
-    void solveCellPosition(CellInfo *cell)
+    void solveCellPosition(CellInfo *cell, int iter)
     {
         CellLocation &cloc = cell_locs[cell->name];
         double net_divergence_sum_x = 0.0, net_divergence_sum_y = 0.0;
@@ -955,18 +990,42 @@ class ForcePlacer
         NPNR_ASSERT(net_divergence_sum_y > 0);
         cloc.rawx = next_rawx / net_divergence_sum_x;
         cloc.rawy = next_rawy / net_divergence_sum_y;
-
+#if 0
+        // 参数很难调整，不如选择直接在rawx和rawy的基础上线性组合
+        if (iter > 0) {
+            double Sxn = std::sqrt(1.0 + std::pow(cloc.rawx - cloc.legal_x, 2.0)) * cfg.alpha *
+                         (std::max(1.0, double(cfg.hpwl_scale_x * std::abs(cloc.rawx - cloc.legal_x)))) /
+                         (1.0 + 1.0 * iter);
+            double Syn = std::sqrt(1.0 + std::pow(cloc.rawy - cloc.legal_y, 2.0)) * cfg.alpha *
+                         (std::max(1.0, double(cfg.hpwl_scale_y * std::abs(cloc.rawy - cloc.legal_y)))) /
+                         (1.0 + 1.0 * iter);
+            net_divergence_sum_x += 1.0 / Sxn;
+            net_divergence_sum_y += 1.0 / Syn;
+            next_rawx += cloc.legal_x / Sxn;
+            next_rawy += cloc.legal_y / Syn;
+        }
+#else
+        if (iter > 0) {
+            double weight = std::min(1.0, double(cfg.alpha * iter));
+            cloc.rawx = (1 - weight) * cloc.rawx + weight * double(cloc.best_legal_x);
+            cloc.rawy = (1 - weight) * cloc.rawy + weight * double(cloc.best_legal_y);
+        }
+#endif
         cloc.x = int(cloc.rawx);
         cloc.y = int(cloc.rawy);
+        if (cell->region != nullptr) {
+            cloc.x = limit_to_reg(cell->region, cloc.x, false);
+            cloc.y = limit_to_reg(cell->region, cloc.y, true);
+        }
     }
 
     // 更新所有cell的新位置
-    void solveAllCellPosition()
+    void solveAllCellPosition(int iter = -1)
     {
-        for (auto cell : place_cells) {
+        for (auto cell : solve_cells) {
             if (cell_locs.at(cell->name).global || cell_locs.at(cell->name).locked)
                 continue;
-            solveCellPosition(cell);
+            solveCellPosition(cell, iter);
         }
     }
 
@@ -1645,6 +1704,8 @@ PlacerFCfg::PlacerFCfg(Context *ctx)
     gamma = 1;
     criticalityExponent = ctx->setting<int>("placerForce/criticalityExponent", 2);
     timingWeight = ctx->setting<int>("placerForce/timingWeight", 10);
+    beta = ctx->setting<float>("placerForce/beta", 0.9);
+    alpha = ctx->setting<float>("placerForce/alpha", 0.1);
     timeDriven = true;
 }
 
