@@ -158,7 +158,7 @@ class ForcePlacer
             assign_budget(ctx);
         setupSolveCells();
 #if 1
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 5; i++) {
             updateAllNetStar();
             solveAllCellPosition();
             updateAllChain();
@@ -186,8 +186,6 @@ class ForcePlacer
         // =========================================================================================================
         // placer正式算法开始
         place_start_time_anchor_point = std::chrono::high_resolution_clock::now();
-        if (cfg.timeDriven)
-            get_criticalities(ctx, &net_crit);
 
         // 计算线长开销与延迟开销
         curr_wirelen_cost = totalWirelenCost();
@@ -300,7 +298,6 @@ class ForcePlacer
                 log_error("constraint satisfaction check failed for cell \'%s\' at Bel \'%s\'.\n",
                           cell.first.c_str(ctx), ctx->getBelName(cell.second->bel).c_str(ctx));
         }
-        timing_analysis(ctx);
         log_info("Final placement valided check done.\n");
 
         ctx->unlock();
@@ -911,6 +908,47 @@ class ForcePlacer
     }
 #endif
 
+    // HPWL线长估计模型修正因子
+    // 源自文献RISA: accurate and efficient placement routability modeling
+    double hpwlWightFactor(int size)
+    {
+        NPNR_ASSERT(size > 0);
+        if (size > 0 && size <= 3)
+            return 1.0;
+        else if (size <= 10) {
+            switch (size) {
+            case 4:
+                return 1.0828;
+            case 5:
+                return 1.1536;
+            case 6:
+                return 1.2206;
+            case 7:
+                return 1.2823;
+            case 8:
+                return 1.3385;
+            case 9:
+                return 1.3991;
+            case 10:
+                return 1.4493;
+            };
+        } else if (size <= 15)
+            return 1.6899;
+        else if (size <= 20)
+            return 1.8924;
+        else if (size <= 25)
+            return 2.0743;
+        else if (size <= 30)
+            return 2.2334;
+        else if (size <= 35)
+            return 2.3895;
+        else if (size <= 40)
+            return 2.5356;
+        else if (size <= 45)
+            return 2.6625;
+        return 2.7933;
+    }
+
     // 更新net的分布中心点信息和散度信息
     void updateNetStar(NetInfo *net)
     {
@@ -929,8 +967,10 @@ class ForcePlacer
             y_sum = double(cloc.y);
         }
         BoundingBox bb = getNetBounds(net);
-        ns.x_weight = 1 / (ns.net_len * (std::max<double>(1.0, cfg.hpwl_scale_x * std::abs(bb.x1 - bb.x0))));
-        ns.y_weight = 1 / (ns.net_len * (std::max<double>(1.0, cfg.hpwl_scale_y * std::abs(bb.y1 - bb.y0))));
+        ns.x_weight =
+                1 / (hpwlWightFactor(ns.net_len) * (std::max<double>(1.0, cfg.hpwl_scale_x * std::abs(bb.x1 - bb.x0))));
+        ns.y_weight =
+                1 / (hpwlWightFactor(ns.net_len) * (std::max<double>(1.0, cfg.hpwl_scale_y * std::abs(bb.y1 - bb.y0))));
         for (size_t i = 0; i < net->users.size(); i++) {
             CellInfo *ci = net->users.at(i).cell;
             CellLocation cloc = cell_locs[ci->name];
@@ -943,8 +983,8 @@ class ForcePlacer
                 if (i < nc.size()) {
                     // nc内部是一些小于1大于0的浮点数
                     double update_weight = 1.0 + cfg.timingWeight * std::pow(nc.at(i), cfg.criticalityExponent);
-                    ns.x_weight *= update_weight;
-                    ns.y_weight *= update_weight;
+                    ns.x_weight /= update_weight;
+                    ns.y_weight /= update_weight;
                 }
             }
         }
@@ -988,31 +1028,37 @@ class ForcePlacer
         }
         NPNR_ASSERT(net_divergence_sum_x > 0);
         NPNR_ASSERT(net_divergence_sum_y > 0);
-        cloc.rawx = next_rawx / net_divergence_sum_x;
-        cloc.rawy = next_rawy / net_divergence_sum_y;
 #if 0
         // 参数很难调整，不如选择直接在rawx和rawy的基础上线性组合
         if (iter > 0) {
-            double Sxn = std::sqrt(1.0 + std::pow(cloc.rawx - cloc.legal_x, 2.0)) * cfg.alpha *
-                         (std::max(1.0, double(cfg.hpwl_scale_x * std::abs(cloc.rawx - cloc.legal_x)))) /
-                         (1.0 + 1.0 * iter);
-            double Syn = std::sqrt(1.0 + std::pow(cloc.rawy - cloc.legal_y, 2.0)) * cfg.alpha *
-                         (std::max(1.0, double(cfg.hpwl_scale_y * std::abs(cloc.rawy - cloc.legal_y)))) /
-                         (1.0 + 1.0 * iter);
+            double Sxn = std::sqrt(1.0 + std::pow(cloc.rawx - cloc.best_legal_x, 2.0)) * cfg.alpha *
+                         (std::max(0.1, double(cfg.hpwl_scale_x * std::abs(cloc.rawx - cloc.best_legal_x)))) /
+                         (1.0 * iter);
+            double Syn = std::sqrt(1.0 + std::pow(cloc.rawy - cloc.best_legal_y, 2.0)) * cfg.alpha *
+                         (std::max(0.1, double(cfg.hpwl_scale_y * std::abs(cloc.rawy - cloc.best_legal_y)))) /
+                         (1.0 * iter);
             net_divergence_sum_x += 1.0 / Sxn;
             net_divergence_sum_y += 1.0 / Syn;
             next_rawx += cloc.legal_x / Sxn;
             next_rawy += cloc.legal_y / Syn;
         }
+        cloc.rawx = next_rawx / net_divergence_sum_x;
+        cloc.rawy = next_rawy / net_divergence_sum_y;
 #else
+        cloc.rawx = next_rawx / net_divergence_sum_x;
+        cloc.rawy = next_rawy / net_divergence_sum_y;
         if (iter > 0) {
-            double weight = std::min(1.0, double(cfg.alpha * iter));
-            cloc.rawx = (1 - weight) * cloc.rawx + weight * double(cloc.best_legal_x);
-            cloc.rawy = (1 - weight) * cloc.rawy + weight * double(cloc.best_legal_y);
+            double weight = double(cfg.alpha * iter);
+            double weight_x =
+                    std::min(1.0, std::max(0.0, weight / std::log10(std::abs(cloc.rawx - cloc.best_legal_x) + 1)));
+            double weight_y =
+                    std::min(1.0, std::max(0.0, weight / std::log10(std::abs(cloc.rawy - cloc.best_legal_y) + 1)));
+            cloc.rawx = (1 - weight_x) * cloc.rawx + weight_x * double(cloc.best_legal_x);
+            cloc.rawy = (1 - weight_y) * cloc.rawy + weight_y * double(cloc.best_legal_y);
         }
 #endif
-        cloc.x = int(cloc.rawx);
-        cloc.y = int(cloc.rawy);
+        cloc.x = std::round(cloc.rawx);
+        cloc.y = std::round(cloc.rawy);
         if (cell->region != nullptr) {
             cloc.x = limit_to_reg(cell->region, cloc.x, false);
             cloc.y = limit_to_reg(cell->region, cloc.y, true);
