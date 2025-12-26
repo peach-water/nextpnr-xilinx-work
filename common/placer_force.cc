@@ -268,9 +268,9 @@ class ForcePlacer
         log_break();
         log_info("Force placement time: %.2fs.\n",
                  std::chrono::duration<float>(place_end_time_anchor_point - place_start_time_anchor_point).count());
-        log_info("  of legalisation: %.2fs\n", legalise_time);
-        log_info("  of solve: %.2fs.\n", solve_time);
+        log_info("  of solving time: %.2fs.\n", solve_time);
         log_info("  of spreading cells: %.2fs.\n", spread_time);
+        log_info("  of strict legalisation: %.2fs\n", legalise_time);
 
         curr_wirelen_cost = totalWirelenCost();
         log_break();
