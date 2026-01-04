@@ -908,47 +908,6 @@ class ForcePlacer
     }
 #endif
 
-    // HPWL线长估计模型修正因子
-    // 源自文献RISA: accurate and efficient placement routability modeling
-    double hpwlWightFactor(int size)
-    {
-        NPNR_ASSERT(size > 0);
-        if (size > 0 && size <= 3)
-            return 1.0;
-        else if (size <= 10) {
-            switch (size) {
-            case 4:
-                return 1.0828;
-            case 5:
-                return 1.1536;
-            case 6:
-                return 1.2206;
-            case 7:
-                return 1.2823;
-            case 8:
-                return 1.3385;
-            case 9:
-                return 1.3991;
-            case 10:
-                return 1.4493;
-            };
-        } else if (size <= 15)
-            return 1.6899;
-        else if (size <= 20)
-            return 1.8924;
-        else if (size <= 25)
-            return 2.0743;
-        else if (size <= 30)
-            return 2.2334;
-        else if (size <= 35)
-            return 2.3895;
-        else if (size <= 40)
-            return 2.5356;
-        else if (size <= 45)
-            return 2.6625;
-        return 2.7933;
-    }
-
     // 更新net的分布中心点信息和散度信息
     void updateNetStar(NetInfo *net)
     {
@@ -1739,6 +1698,47 @@ class ForcePlacer
         }
     };
 };
+
+// HPWL线长估计模型修正因子
+// 源自文献RISA: accurate and efficient placement routability modeling
+double hpwlWightFactor(int size)
+{
+    NPNR_ASSERT(size > 0);
+    if (size <= 3)
+        return 1.0;
+    else if (size <= 10) {
+        switch (size) {
+        case 4:
+            return 1.0828;
+        case 5:
+            return 1.1536;
+        case 6:
+            return 1.2206;
+        case 7:
+            return 1.2823;
+        case 8:
+            return 1.3385;
+        case 9:
+            return 1.3991;
+        case 10:
+            return 1.4493;
+        };
+    } else if (size <= 15)
+        return 1.6899;
+    else if (size <= 20)
+        return 1.8924;
+    else if (size <= 25)
+        return 2.0743;
+    else if (size <= 30)
+        return 2.2334;
+    else if (size <= 35)
+        return 2.3895;
+    else if (size <= 40)
+        return 2.5356;
+    else if (size <= 45)
+        return 2.6625;
+    return 2.7933;
+}
 
 PlacerFCfg::PlacerFCfg(Context *ctx)
 {
