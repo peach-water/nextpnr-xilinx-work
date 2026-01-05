@@ -28,6 +28,8 @@ template <> struct hash<std::pair<NEXTPNR_NAMESPACE_PREFIX IdString, std::size_t
 
 NEXTPNR_NAMESPACE_BEGIN
 
+double hpwlWightFactor(int num);
+
 class ForcePlacer
 {
   private:
