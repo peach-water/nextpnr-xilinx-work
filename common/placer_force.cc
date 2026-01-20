@@ -158,6 +158,27 @@ class ForcePlacer
         // 暂时不确定用途，应该是计算时序约束
         if (cfg.timeDriven && cfg.slack_redist_iter > 0)
             assign_budget(ctx);
+
+        std::vector<std::unordered_set<IdString>> force_runs;
+        std::unordered_set<IdString> all_celltypes;
+        std::unordered_map<IdString, int> ct_count;
+
+        for (auto cell : place_cells) {
+            if (!all_celltypes.count(cell->type)) {
+                force_runs.push_back(std::unordered_set<IdString>{cell->type});
+                all_celltypes.insert(cell->type);
+            }
+            ct_count[cell->type]++;
+        }
+        for (auto &c : ct_count) {
+            if (c.second >= 0.98 * int(place_cells.size())) {
+                force_runs.clear();
+                break;
+            }
+        }
+        if (true)
+            force_runs.clear();
+        force_runs.push_back(all_celltypes);
         setupSolveCells();
 #if 1
         for (int i = 0; i < 5; i++) {
@@ -208,53 +229,59 @@ class ForcePlacer
         // 算法主循环逻辑
         log_info("Runing Force placer.\n");
         for (int iter = 1;; iter++) {
-            auto solve_time_start_anchor_point = std::chrono::high_resolution_clock::now();
-            auto iter_time_start_anchor_point = solve_time_start_anchor_point;
-            for (int loop = 0; loop < 3; loop++) {
-                updateAllNetStar();             // TODO 扩散后不能及时收缩导致越扩散越开，考虑多次迭代后进行一次合法化
-                solveAllCellPosition(iter - 1); // 第一次运行时legal_x和legal_y处于未初始化状态，因此赋值0
+            for (auto &run : force_runs) {
+                setupSolveCells(&run);
+                auto solve_time_start_anchor_point = std::chrono::high_resolution_clock::now();
+                auto iter_time_start_anchor_point = solve_time_start_anchor_point;
+                for (int loop = 0; loop < 3; loop++) {
+                    updateAllNetStar(); // TODO 扩散后不能及时收缩导致越扩散越开，考虑多次迭代后进行一次合法化
+                    solveAllCellPosition(iter - 1); // 第一次运行时legal_x和legal_y处于未初始化状态，因此赋值0
+                    updateAllChain();
+                    log_info("    at iter-loop #%3d-@%2d, solve wirelength: %ld.\n", iter, loop, totalWirelenCost());
+                }
+                auto solve_time_end_anchor_point = std::chrono::high_resolution_clock::now();
+                solve_time += std::chrono::duration<float>(solve_time_end_anchor_point - solve_time_start_anchor_point)
+                                      .count();
+                solve_wirelen = totalWirelenCost();
+
+                // for (const auto &group : cfg.cellGroups)
+                //     CutSpreader(this, group).run();
+                // for (auto type : sorted(all_celltype)) {
+                //     if (std::all_of(cfg.cellGroups.begin(), cfg.cellGroups.end(),
+                //                     [type](const std::unordered_set<IdString> &grp) { return !grp.count(type); }))
+                //         CutSpreader(this, {type}).run();
+                // }
+                // updateAllChain();
+                // spread_wirelen = totalWirelenCost();
+
+                // 合法化
+                legalisePlacementStrict(true);
                 updateAllChain();
-                log_info("    at iter-loop #%3d-@%2d, solve wirelength: %ld.\n", iter, loop, totalWirelenCost());
-            }
-            auto solve_time_end_anchor_point = std::chrono::high_resolution_clock::now();
-            solve_time +=
-                    std::chrono::duration<float>(solve_time_end_anchor_point - solve_time_start_anchor_point).count();
-            solve_wirelen = totalWirelenCost();
-
-            // for (const auto &group : cfg.cellGroups)
-            //     CutSpreader(this, group).run();
-            // for (auto type : sorted(all_celltype)) {
-            //     if (std::all_of(cfg.cellGroups.begin(), cfg.cellGroups.end(),
-            //                     [type](const std::unordered_set<IdString> &grp) { return !grp.count(type); }))
-            //         CutSpreader(this, {type}).run();
-            // }
-            updateAllChain();
-            spread_wirelen = totalWirelenCost();
-
-            // 合法化
-            legalisePlacementStrict(true);
-            updateAllChain();
-            for (auto &cell : cell_locs)
-                cell.second.legal();
-            if (cfg.timeDriven)
-                get_criticalities(ctx, &net_crit);
-
-            legal_wirelen = totalWirelenCost();
-            curr_wirelen_cost = legal_wirelen;
-            auto iter_time_end_archor_point = std::chrono::high_resolution_clock::now();
-            log_info("  at iter #%3d: solve wirelength: %ld, spread wirelength: %ld, legal wirelength: %ld, time = "
-                     "%.3fs.\n",
-                     iter, solve_wirelen, spread_wirelen, legal_wirelen,
-                     std::chrono::duration<float>(iter_time_end_archor_point - iter_time_start_anchor_point).count());
-            if (curr_wirelen_cost < best_wirelen_cost) {
-                best_wirelen_cost = curr_wirelen_cost;
-                n_no_progress = 0;
-                // 保存当前最优解
                 for (auto &cell : cell_locs)
-                    cell.second.bestLegal();
-            } else {
-                ++n_no_progress;
+                    cell.second.legal();
+                if (cfg.timeDriven)
+                    get_criticalities(ctx, &net_crit);
+
+                legal_wirelen = totalWirelenCost();
+                curr_wirelen_cost = legal_wirelen;
+                auto iter_time_end_archor_point = std::chrono::high_resolution_clock::now();
+                log_info("  at iter #%3d: solve wirelength: %ld, spread wirelength: %ld, legal wirelength: %ld, time = "
+                         "%.3fs.\n",
+                         iter, solve_wirelen, spread_wirelen, legal_wirelen,
+                         std::chrono::duration<float>(iter_time_end_archor_point - iter_time_start_anchor_point)
+                                 .count());
+
+                if (curr_wirelen_cost < best_wirelen_cost) {
+                    best_wirelen_cost = curr_wirelen_cost;
+                    n_no_progress = 0;
+                    // 保存当前最优解
+                    for (auto &cell : cell_locs)
+                        cell.second.bestLegal();
+                } else {
+                    ++n_no_progress;
+                }
             }
+
             if (n_no_progress >= 5)
                 break;
             ctx->yield();
@@ -264,6 +291,38 @@ class ForcePlacer
             cell.second.x = cell.second.best_legal_x;
             cell.second.y = cell.second.best_legal_y;
         }
+#if 0
+        // 用于调试和debug
+        // 输出线网集中度和cell布局信息
+        for (auto & cell : sorted(ctx->cells)) {
+            Loc loc = ctx->getBelLocation(cell.second->bel);
+            std::printf("(%3d, %3d, %3d)   %s\n", loc.x, loc.y, loc.z, cell.second->name.c_str(ctx));
+        }
+        std::vector<std::vector<int>> route_map(max_x+1, std::vector<int>(max_y+1, 0));
+        for (auto & net : sorted(ctx->nets)) {
+            if (net.second->driver.cell == nullptr)
+                continue;
+            BoundingBox box = getNetBounds(net.second);
+            for (int x = box.x0; x <= box.x1; x++)
+                for (int y = box.y0; y <= box.y1; y++) 
+                    route_map[x][y] ++;
+        }
+        for (int x = 0; x <= max_x; x++) {
+            std::cout << std::endl;
+            for (int y = 0; y < max_y; y++) {
+                std::printf("%3d, ", route_map[x][y]);
+            }
+        }
+        std::map<int, int> chain_size_visual;
+        for (auto size : chain_size) {
+            if (chain_size_visual.count(size.second) == 0)
+                chain_size_visual[size.second] = 0;
+            chain_size_visual[size.second] ++;
+        }
+        for (auto size : chain_size_visual) {
+            std::printf("size %3d -> count %3d\n", size.first, size.second);
+        }
+#endif
         legalisePlacementStrict(true);
 
         place_end_time_anchor_point = std::chrono::high_resolution_clock::now();
@@ -857,7 +916,6 @@ class ForcePlacer
     }
 #endif
 
-#if 1
     // 更新链接的子节点
     void updateChain(CellInfo *cell, CellInfo *root)
     {
@@ -891,7 +949,7 @@ class ForcePlacer
     }
 
     // 搜集所有需要布局的模块信息
-    int setupSolveCells()
+    int setupSolveCells(std::unordered_set<IdString> *celltypes = nullptr)
     {
         int row = 0;
         solve_cells.clear();
@@ -900,6 +958,8 @@ class ForcePlacer
             cell.second->udata = dont_solve;
         // 更新需要布局cell的udata
         for (auto cell : place_cells) {
+            if (celltypes && !celltypes->count(cell->type))
+                continue;
             cell->udata = row++;
             solve_cells.push_back(cell);
         }
@@ -908,7 +968,6 @@ class ForcePlacer
             ctx->cells.at(chained.first)->udata = chained.second->udata;
         return row;
     }
-#endif
 
     // 更新net的分布中心点信息和散度信息
     void updateNetStar(NetInfo *net)
